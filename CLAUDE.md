@@ -30,9 +30,17 @@ uvicorn dashboard.app:app --host 0.0.0.0 --port 8000
 
 # Apply DB migrations manually (main.py also does this automatically on startup)
 python -m core.db.migrate
+
+# Run the test suite
+pytest -v
+
+# Send the daily Groww API key re-approval reminder manually (normally fires via
+# deploy/groww-key-reminder.timer at 9 PM IST, the evening before the 6 AM reset)
+python -m scripts.groww_key_reminder
 ```
 
-There are no tests, lint config, or CI in this repo currently.
+Tests live in `tests/` (pytest, see `pytest.ini`/`requirements-dev.txt`) and run in CI on every
+push/PR to `main` (`.github/workflows/ci.yml`). There is no lint config yet.
 
 Config is via `.env` (see `.env.example`), loaded through `config/settings.py`. Key risk knobs:
 `MAX_ORDER_VALUE_INR`, `MAX_DAILY_LOSS_INR`, `MAX_TRADES_PER_DAY`, `MAX_POSITION_QTY`,
@@ -105,7 +113,10 @@ directly from the orchestrator or a strategy.
   (`status='PROPOSED'`), then calls `risk_manager.check()`, then updates that same row's status after
   execution, then writes to `positions_repo` on a fill. Win/loss counts and deployed capital are
   **not** tracked as running counters anywhere — they're derived from `positions` on read (see
-  `dashboard/app.py`), so they can't drift from the orders/positions ledger.
+  `dashboard/app.py`), so they can't drift from the orders/positions ledger. `_notify()` (a thin
+  try/except wrapper over `core.notifier.send_telegram`, mirroring the `_write_heartbeat`
+  fire-and-forget pattern) fires on fills (after the order status DB update, never before) and
+  on an unhandled exception escaping `run_once` inside `run_forever`'s loop.
 
 - **`core/status_writer.py`** — writes a small `logs/heartbeat.json` after every cycle (mode,
   halted, halt_reason, symbols, last_ltp only) via atomic write (`tempfile` + `os.replace`). This is
@@ -125,17 +136,57 @@ directly from the orchestrator or a strategy.
 
 - **`core/auth.py`** — Groww API auth using the API Key + Secret flow (`GROWW_API_KEY` /
   `GROWW_API_SECRET`, resets daily), not the alternative TOTP flow, despite `pyotp` being a
-  dependency.
+  dependency. The daily reset requires a human to click "Approve" on Groww's own dashboard
+  (`https://groww.in/trade-api/api-keys`) before 6 AM IST — there is no API for that click, so
+  it can't be automated (see `scripts/groww_key_reminder.py` below).
+
+- **`core/notifier.py`** — best-effort Telegram notifications, never raises (dead network / bad
+  token just means a missed message, not a broken trading loop). Two entrypoints sharing one
+  HTTP call: `send_telegram(settings, message)` for callers with a `Settings` object
+  (`Orchestrator`, `main.py`), `send_telegram_raw(token, chat_id, message)` for callers that
+  only have the two raw config values (`RiskManager`, `scripts/groww_key_reminder.py`). No-ops
+  silently when `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` are unset — both are present but empty
+  in `.env.example` and on the droplet today, so this is currently dormant in production.
+  Notifies on: bot startup, order fills, and halts (automatic daily-loss-breach and manual) —
+  deliberately not on routine risk-rejected orders, which would make the channel too noisy to
+  be useful.
+
+- **`scripts/groww_key_reminder.py`** — standalone daily reminder (not imported by anything
+  else) that pings Telegram to re-approve the Groww API key. Deliberately independent of the
+  bot process, the DB, and Groww auth itself, since it has to keep working even when the thing
+  it's warning about — an expired key — is the bot's actual problem. Scheduled via
+  `deploy/groww-key-reminder.timer` (systemd, not cron, to stay consistent with how the other
+  two services are run) at 9 PM IST the evening before the reset.
 
 - **`main.py`** — entry point. Builds `RiskManager` → broker (`LiveBroker` or `PaperBroker`
   depending on the `--live` flag + `MODE` env var) → strategy → `Orchestrator`, then calls
   `run_forever()`. Paper mode still attempts Groww auth to get real LTP data but degrades gracefully
-  (falls back to no live prices) if credentials are missing.
+  (falls back to no live prices) if credentials are missing. Sends a startup notification (mode +
+  symbols) right before entering `run_forever()`.
+
+- **`deploy/`** — systemd unit files, checked in for reproducibility. `groww-bot.service` and
+  `groww-dashboard.service` are copies of what's actually running on the droplet (deployed
+  manually to `/etc/systemd/system/`, not auto-synced from the repo — a `git pull` alone does
+  not update them). `groww-key-reminder.{service,timer}` run the daily key-reminder script.
 
 ## Known phased plan
 
-This codebase is being developed in phases (Phase 0–6 as tracked by the user outside this repo).
-Phase 0 (done) replaced the in-memory orchestrator/risk_manager state and the full `logs/status.json`
-snapshot with a SQLite-backed layer (`core/db/`) for orders, positions, risk_events, and daily
-summaries — `logs/heartbeat.json` remains, but only for process-liveness + live LTP, both of which
-are intentionally not persisted to the DB. Phases 1–6 are not yet started.
+This codebase is being developed in phases (Phase 0–6+ as tracked by the user outside this repo).
+
+- **Phase 0 (done)** replaced the in-memory orchestrator/risk_manager state and the full
+  `logs/status.json` snapshot with a SQLite-backed layer (`core/db/`) for orders, positions,
+  risk_events, and daily summaries — `logs/heartbeat.json` remains, but only for
+  process-liveness + live LTP, both of which are intentionally not persisted to the DB. Deployed
+  to a DigitalOcean droplet as two systemd services (`groww-bot.service`,
+  `groww-dashboard.service`, see `deploy/`).
+- **Phase 1 (done)** added the `tests/` pytest suite (risk manager, orchestrator, strategy,
+  execution, DB layer) and CI (`.github/workflows/ci.yml`).
+- **Phase 2 (done, not yet deployed)** added `core/notifier.py` (Telegram alerts on startup,
+  fills, and halts) and `scripts/groww_key_reminder.py` (daily reminder for Groww's manual API
+  key re-approval). Merged and tested, but **not yet live on the droplet** — needs a real
+  Telegram bot token/chat ID in `.env` and the new systemd units installed before it does
+  anything (currently a silent no-op in production, by design).
+- **Phases 3+** not yet scoped. Known open item independent of phase work: Groww's live-data
+  quote endpoint was returning `403 Access forbidden` as of 2026-08-25, cause not yet confirmed
+  (market-hours restriction vs. an account-side Live Data permission gap) — being rechecked
+  during NSE trading hours.
