@@ -1,0 +1,18 @@
+[Unit]
+Description=TradePilotAI trading bot (paper mode)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=trader
+Group=trader
+WorkingDirectory=/home/trader/groww-agent
+ExecStart=/home/trader/groww-agent/venv/bin/python main.py --symbols RELIANCE --poll-interval 5
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/home/trader/groww-agent/logs/service.log
+StandardError=append:/home/trader/groww-agent/logs/service.log
+
+[Install]
+WantedBy=multi-user.target

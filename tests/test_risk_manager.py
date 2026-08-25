@@ -1,5 +1,6 @@
 from datetime import date, timedelta
 
+import core.risk_manager as risk_manager_module
 from config.settings import RiskConfig
 from core.db import orders_repo, positions_repo
 from core.models import ProposedOrder, Side, OrderType, Segment
@@ -175,3 +176,32 @@ def test_record_fill_increments_trade_count_and_pnl():
     rm.record_fill(side=Side.SELL, order_value=100.0, pnl_delta=50.0)
     assert rm._trades_today == 2
     assert rm._realized_pnl_today == 50.0
+
+
+def test_daily_loss_breach_triggers_exactly_one_notification(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        risk_manager_module, "send_telegram_raw",
+        lambda token, chat_id, msg: calls.append(msg) or True,
+    )
+    rm = RiskManager(make_cfg(max_daily_loss_inr=1_000),
+                      telegram_bot_token="TOK", telegram_chat_id="CHAT")
+
+    rm.record_fill(side=Side.SELL, order_value=500.0, pnl_delta=-1_200.0)
+
+    assert len(calls) == 1
+    assert "TRADING HALTED" in calls[0]
+
+
+def test_manual_halt_triggers_exactly_one_notification(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        risk_manager_module, "send_telegram_raw",
+        lambda token, chat_id, msg: calls.append(msg) or True,
+    )
+    rm = RiskManager(make_cfg(), telegram_bot_token="TOK", telegram_chat_id="CHAT")
+
+    rm.manual_halt("test halt reason")
+
+    assert len(calls) == 1
+    assert "test halt reason" in calls[0]

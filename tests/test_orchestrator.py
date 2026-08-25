@@ -1,3 +1,4 @@
+import core.orchestrator as orchestrator_module
 from config.settings import RiskConfig, Settings
 from core.db import orders_repo, positions_repo
 from core.execution import PaperBroker
@@ -150,3 +151,35 @@ def test_strategy_returning_none_does_not_create_order():
     orchestrator.run_once(symbols=["RELIANCE"])
 
     assert orders_repo.get_recent_orders(10) == []
+
+
+def test_filled_order_triggers_exactly_one_notification(monkeypatch):
+    calls = []
+    monkeypatch.setattr(orchestrator_module, "send_telegram", lambda settings, msg: calls.append(msg) or True)
+
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=100.0)
+    strategy = ScriptedStrategy({"RELIANCE": [make_buy_order()]})
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+
+    orchestrator.run_once(symbols=["RELIANCE"])
+
+    assert len(calls) == 1
+    assert "RELIANCE" in calls[0]
+    assert "FILLED" in calls[0]
+
+
+def test_blocked_order_does_not_trigger_notification(monkeypatch):
+    calls = []
+    monkeypatch.setattr(orchestrator_module, "send_telegram", lambda settings, msg: calls.append(msg) or True)
+
+    settings = make_settings(max_trades_per_day=0)
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=100.0)
+    strategy = ScriptedStrategy({"RELIANCE": [make_buy_order()]})
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+
+    orchestrator.run_once(symbols=["RELIANCE"])
+
+    assert calls == []

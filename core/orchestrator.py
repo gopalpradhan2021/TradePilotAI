@@ -11,6 +11,7 @@ import time
 from config.settings import Settings
 from core.db import orders_repo, positions_repo, risk_repo
 from core.models import ProposedOrder, Side
+from core.notifier import send_telegram
 from core.status_writer import write_heartbeat
 
 logger = logging.getLogger("groww_agent.orchestrator")
@@ -23,6 +24,12 @@ class Orchestrator:
         self.risk_manager = risk_manager
         self.strategy = strategy
         self._last_ltp: dict[str, float | None] = {}
+
+    def _notify(self, message: str):
+        try:
+            send_telegram(self.settings, message)
+        except Exception as e:
+            logger.error("Failed to send notification: %s", e)
 
     def run_once(self, symbols: list[str]):
         if self.risk_manager.halted:
@@ -87,6 +94,10 @@ class Orchestrator:
 
         if result.status == "FILLED" and result.fill_price is not None:
             order_value = result.fill_price * order.qty
+            self._notify(
+                f"✅ FILLED {order.side.value} {order.qty} {order.symbol} "
+                f"@ ₹{result.fill_price:.2f} (mode={self.settings.mode})"
+            )
 
             if order.side == Side.BUY:
                 positions_repo.open_position(
@@ -116,4 +127,5 @@ class Orchestrator:
                 self.run_once(symbols)
             except Exception as e:
                 logger.exception("Unhandled error in run_once: %s", e)
+                self._notify(f"🔴 groww-bot crashed in run_once: {e}")
             time.sleep(poll_interval_sec)

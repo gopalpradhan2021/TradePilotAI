@@ -1,0 +1,9 @@
+[Unit]
+Description=Fire groww-key-reminder daily at 9:00 PM IST (evening before the 6 AM reset)
+
+[Timer]
+OnCalendar=*-*-* 15:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

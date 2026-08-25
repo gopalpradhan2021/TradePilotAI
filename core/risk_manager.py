@@ -14,15 +14,25 @@ from datetime import date
 from config.settings import RiskConfig
 from core.db import positions_repo, risk_repo
 from core.models import ProposedOrder, RiskCheckResult, Side
+from core.notifier import send_telegram_raw
 
 logger = logging.getLogger("groww_agent.risk")
 
 
 class RiskManager:
-    def __init__(self, risk_config: RiskConfig):
+    def __init__(self, risk_config: RiskConfig, telegram_bot_token: str = "",
+                 telegram_chat_id: str = ""):
         self.cfg = risk_config
+        self._telegram_bot_token = telegram_bot_token
+        self._telegram_chat_id = telegram_chat_id
         self._current_day = date.today()
         self._sync_daily_state()
+
+    def _notify(self, message: str):
+        try:
+            send_telegram_raw(self._telegram_bot_token, self._telegram_chat_id, message)
+        except Exception as e:
+            logger.error("Failed to send notification: %s", e)
 
     def _sync_daily_state(self):
         summary = risk_repo.get_or_create_daily_summary(self._current_day.isoformat())
@@ -60,6 +70,7 @@ class RiskManager:
                 order_id=order_id, symbol=None, event_type="HALTED", reasons=[self.halt_reason],
             )
             logger.critical("TRADING HALTED: %s", self.halt_reason)
+            self._notify(f"🔴 TRADING HALTED: {self.halt_reason}")
 
     def manual_halt(self, reason: str = "manual kill switch"):
         self.halted = True
@@ -69,6 +80,7 @@ class RiskManager:
             order_id=None, symbol=None, event_type="HALTED", reasons=[reason],
         )
         logger.critical("TRADING HALTED (manual): %s", reason)
+        self._notify(f"🔴 TRADING HALTED (manual): {reason}")
 
     def check(self, order: ProposedOrder, last_traded_price: float | None,
               order_id: int) -> RiskCheckResult:

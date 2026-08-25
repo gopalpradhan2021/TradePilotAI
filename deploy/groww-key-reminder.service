@@ -1,0 +1,13 @@
+[Unit]
+Description=Reminder to re-approve the Groww API key (daily 6 AM IST reset)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=trader
+Group=trader
+WorkingDirectory=/home/trader/groww-agent
+ExecStart=/home/trader/groww-agent/venv/bin/python -m scripts.groww_key_reminder
+StandardOutput=append:/home/trader/groww-agent/logs/key_reminder.log
+StandardError=append:/home/trader/groww-agent/logs/key_reminder.log
