@@ -339,17 +339,17 @@ def _render(status: dict) -> str:
         }}
 
         function doStop() {{
-            const reason = prompt('Reason for stopping?', 'manual stop (dashboard)');
-            if (reason === null) return;
             if (!confirm('Stop the bot now? No new orders will be placed, and the process ' +
                          'will be stopped too if the dashboard has permission to do so.')) return;
+            const reason = prompt('Reason for stopping?', 'manual stop (dashboard)');
+            if (reason === null) return;
             postBotAction('/api/bot/stop', reason);
         }}
 
         function doStart() {{
+            if (!confirm('Start the bot now?')) return;
             const reason = prompt('Reason for starting?', 'manual start (dashboard)');
             if (reason === null) return;
-            if (!confirm('Start the bot now?')) return;
             postBotAction('/api/bot/start', reason);
         }}
     </script>
