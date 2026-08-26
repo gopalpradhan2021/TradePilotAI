@@ -69,7 +69,11 @@ directly from the orchestrator or a strategy.
   only strategy interface. `ma_rsi_strategy.py` (MA crossover + RSI filter) is the only real
   strategy; it keeps its own per-symbol rolling price window (`SymbolState`, fed one LTP per cycle)
   rather than calling a historical-data API. Strategies are stateful across cycles but must stay
-  broker-agnostic — they only see price, never account/position state.
+  broker-agnostic — they only see price, never account/position state. Crossover detection requires
+  the short/long MA gap to exceed `MIN_CROSSOVER_GAP_PCT` (filters sub-tick price noise from being
+  read as a trend reversal) and gates new entries with a `COOLDOWN_SECONDS` wall-clock cooldown
+  after an exit (`SymbolState.last_exit_time`, `time.monotonic()`) — added in Phase 3 after live
+  trading showed the un-gated version whipsawing on flat price action.
 
 - **`core/risk_manager.py`** — the single gate all orders pass through. Per-day counters
   (`_trades_today`, `_realized_pnl_today`) and the `halted`/`halt_reason` kill-switch are persisted
@@ -183,15 +187,19 @@ This codebase is being developed in phases (Phase 0–6+ as tracked by the user 
   `groww-dashboard.service`, see `deploy/`).
 - **Phase 1 (done)** added the `tests/` pytest suite (risk manager, orchestrator, strategy,
   execution, DB layer) and CI (`.github/workflows/ci.yml`).
-- **Phase 2 (done, not yet deployed)** added `core/notifier.py` (ntfy.sh alerts on startup,
-  fills, and halts) and `scripts/groww_key_reminder.py` (daily reminder for Groww's manual API
-  key re-approval). Merged and tested, but **not yet live on the droplet** — needs a real
-  `NTFY_TOPIC` in `.env` and the new systemd units installed before it does anything (currently
-  a silent no-op in production, by design).
-- **Phases 3+** not yet scoped. Groww's live-data `403 Access forbidden` issue (present as of
-  2026-08-25) is now resolved as of 2026-08-26 — root cause was the account being on Groww's
-  free tier, which doesn't include Live Data access; a paid Trading API subscription
-  (₹499+taxes/month) unlocked it immediately, no code changes needed. The bot is now placing
-  real (paper) trades against live NSE prices. One early observation from live trading: the
-  MA(9,21) crossover strategy can whipsaw on flat/choppy price action (e.g. two trades 5 seconds
-  apart on sub-rupee MA differences) — not a bug, just a tuning consideration for a future phase.
+- **Phase 2 (done, deployed)** added `core/notifier.py` (ntfy.sh alerts on startup, fills, and
+  halts — switched from an original Telegram design after the user's Telegram account was
+  blocked from creating new bots) and `scripts/groww_key_reminder.py` (daily reminder for
+  Groww's manual API key re-approval, via `deploy/groww-key-reminder.timer`). Live on the
+  droplet with a real `NTFY_TOPIC` configured.
+- **Groww's live-data `403 Access forbidden` issue** (present as of 2026-08-25) was resolved on
+  2026-08-26 — root cause was the account being on Groww's free tier, which doesn't include Live
+  Data access; a paid Trading API subscription (₹499+taxes/month) unlocked it immediately, no
+  code changes needed. The bot began placing real (paper) trades against live NSE prices that day.
+- **Phase 3 (done)** fixed whipsaw/overtrading discovered on that first live day: within ~15
+  minutes the MA(9,21) crossover strategy made 10 trades and hit `MAX_TRADES_PER_DAY`, going idle
+  for the rest of the session — every bad entry had a short/long MA gap of ≤0.0008% (sub-tick
+  noise, not a real trend). Fixed in `strategies/ma_rsi_strategy.py` with `MIN_CROSSOVER_GAP_PCT`
+  (minimum relative MA gap to count as a real crossover) and `COOLDOWN_SECONDS` (minimum
+  wall-clock time after an exit before re-entry).
+- **Phases 4+** not yet scoped.

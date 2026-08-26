@@ -11,6 +11,7 @@ whatever last_traded_price the orchestrator passes in each cycle) rather
 than requiring a historical-data API call.
 """
 import logging
+import time
 from collections import deque
 
 from core.models import ProposedOrder, Side, OrderType
@@ -26,6 +27,16 @@ RSI_ENTRY_MAX = 70
 RSI_EXIT_OVERBOUGHT = 75
 STOP_LOSS_PCT = 2.0
 DEFAULT_ORDER_QTY = 1
+
+# Minimum relative gap between short/long MA required to count as a real
+# crossover, not sub-tick price noise. Noise floor observed live on
+# 2026-08-26 was ~0.0008% (RELIANCE oscillating 1304-1307); this is ~60x
+# that floor, still well under RELIANCE's ~0.2% daily range.
+MIN_CROSSOVER_GAP_PCT = 0.0005
+
+# Minimum wall-clock time after closing a position before a new entry is
+# allowed — kills the sub-minute flip-flops seen live (5s, 20s holds).
+COOLDOWN_SECONDS = 60
 
 
 def _sma(prices: list[float], window: int) -> float | None:
@@ -59,6 +70,7 @@ class SymbolState:
         self.entry_price: float | None = None
         self.prev_short_ma: float | None = None
         self.prev_long_ma: float | None = None
+        self.last_exit_time: float | None = None
 
 
 class MARsiStrategy(BaseStrategy):
@@ -90,21 +102,29 @@ class MARsiStrategy(BaseStrategy):
             state.prev_short_ma, state.prev_long_ma = short_ma, long_ma
             return None
 
+        gap_pct = abs(short_ma - long_ma) / long_ma
+
         crossed_up = (
             state.prev_short_ma is not None and state.prev_long_ma is not None
             and state.prev_short_ma <= state.prev_long_ma
             and short_ma > long_ma
+            and gap_pct >= MIN_CROSSOVER_GAP_PCT
         )
         crossed_down = (
             state.prev_short_ma is not None and state.prev_long_ma is not None
             and state.prev_short_ma >= state.prev_long_ma
             and short_ma < long_ma
+            and gap_pct >= MIN_CROSSOVER_GAP_PCT
         )
 
         order = None
 
         if not state.in_position:
-            if crossed_up and RSI_ENTRY_MIN <= rsi <= RSI_ENTRY_MAX:
+            cooldown_active = (
+                state.last_exit_time is not None
+                and (time.monotonic() - state.last_exit_time) < COOLDOWN_SECONDS
+            )
+            if crossed_up and not cooldown_active and RSI_ENTRY_MIN <= rsi <= RSI_ENTRY_MAX:
                 order = ProposedOrder(
                     symbol=symbol,
                     side=Side.BUY,
@@ -155,6 +175,7 @@ class MARsiStrategy(BaseStrategy):
                 logger.info("%s: SELL signal — %s", symbol, order.reason)
                 state.in_position = False
                 state.entry_price = None
+                state.last_exit_time = time.monotonic()
 
         state.prev_short_ma, state.prev_long_ma = short_ma, long_ma
         return order
