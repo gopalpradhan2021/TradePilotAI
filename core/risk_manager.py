@@ -14,23 +14,21 @@ from datetime import date
 from config.settings import RiskConfig
 from core.db import positions_repo, risk_repo
 from core.models import ProposedOrder, RiskCheckResult, Side
-from core.notifier import send_telegram_raw
+from core.notifier import send_notification_raw
 
 logger = logging.getLogger("groww_agent.risk")
 
 
 class RiskManager:
-    def __init__(self, risk_config: RiskConfig, telegram_bot_token: str = "",
-                 telegram_chat_id: str = ""):
+    def __init__(self, risk_config: RiskConfig, ntfy_topic: str = ""):
         self.cfg = risk_config
-        self._telegram_bot_token = telegram_bot_token
-        self._telegram_chat_id = telegram_chat_id
+        self._ntfy_topic = ntfy_topic
         self._current_day = date.today()
         self._sync_daily_state()
 
     def _notify(self, message: str):
         try:
-            send_telegram_raw(self._telegram_bot_token, self._telegram_chat_id, message)
+            send_notification_raw(self._ntfy_topic, message)
         except Exception as e:
             logger.error("Failed to send notification: %s", e)
 

@@ -140,19 +140,21 @@ directly from the orchestrator or a strategy.
   (`https://groww.in/trade-api/api-keys`) before 6 AM IST — there is no API for that click, so
   it can't be automated (see `scripts/groww_key_reminder.py` below).
 
-- **`core/notifier.py`** — best-effort Telegram notifications, never raises (dead network / bad
-  token just means a missed message, not a broken trading loop). Two entrypoints sharing one
-  HTTP call: `send_telegram(settings, message)` for callers with a `Settings` object
-  (`Orchestrator`, `main.py`), `send_telegram_raw(token, chat_id, message)` for callers that
-  only have the two raw config values (`RiskManager`, `scripts/groww_key_reminder.py`). No-ops
-  silently when `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` are unset — both are present but empty
-  in `.env.example` and on the droplet today, so this is currently dormant in production.
+- **`core/notifier.py`** — best-effort push notifications via ntfy.sh (a free, no-signup
+  publish/subscribe service — `POST https://ntfy.sh/<topic>`, the topic name doubles as the
+  password). Chosen over Telegram after the user's Telegram account was blocked by Telegram
+  itself from creating new bots — not a technical issue with the bot-notification approach, just
+  that provider. Never raises (dead network / unconfigured topic just means a missed message,
+  not a broken trading loop). Two entrypoints sharing one HTTP call: `send_notification(settings,
+  message)` for callers with a `Settings` object (`Orchestrator`, `main.py`),
+  `send_notification_raw(topic, message)` for callers that only have the raw topic string
+  (`RiskManager`, `scripts/groww_key_reminder.py`). No-ops silently when `NTFY_TOPIC` is unset.
   Notifies on: bot startup, order fills, and halts (automatic daily-loss-breach and manual) —
   deliberately not on routine risk-rejected orders, which would make the channel too noisy to
   be useful.
 
 - **`scripts/groww_key_reminder.py`** — standalone daily reminder (not imported by anything
-  else) that pings Telegram to re-approve the Groww API key. Deliberately independent of the
+  else) that pings ntfy.sh to re-approve the Groww API key. Deliberately independent of the
   bot process, the DB, and Groww auth itself, since it has to keep working even when the thing
   it's warning about — an expired key — is the bot's actual problem. Scheduled via
   `deploy/groww-key-reminder.timer` (systemd, not cron, to stay consistent with how the other
@@ -181,12 +183,15 @@ This codebase is being developed in phases (Phase 0–6+ as tracked by the user 
   `groww-dashboard.service`, see `deploy/`).
 - **Phase 1 (done)** added the `tests/` pytest suite (risk manager, orchestrator, strategy,
   execution, DB layer) and CI (`.github/workflows/ci.yml`).
-- **Phase 2 (done, not yet deployed)** added `core/notifier.py` (Telegram alerts on startup,
+- **Phase 2 (done, not yet deployed)** added `core/notifier.py` (ntfy.sh alerts on startup,
   fills, and halts) and `scripts/groww_key_reminder.py` (daily reminder for Groww's manual API
   key re-approval). Merged and tested, but **not yet live on the droplet** — needs a real
-  Telegram bot token/chat ID in `.env` and the new systemd units installed before it does
-  anything (currently a silent no-op in production, by design).
-- **Phases 3+** not yet scoped. Known open item independent of phase work: Groww's live-data
-  quote endpoint was returning `403 Access forbidden` as of 2026-08-25, cause not yet confirmed
-  (market-hours restriction vs. an account-side Live Data permission gap) — being rechecked
-  during NSE trading hours.
+  `NTFY_TOPIC` in `.env` and the new systemd units installed before it does anything (currently
+  a silent no-op in production, by design).
+- **Phases 3+** not yet scoped. Groww's live-data `403 Access forbidden` issue (present as of
+  2026-08-25) is now resolved as of 2026-08-26 — root cause was the account being on Groww's
+  free tier, which doesn't include Live Data access; a paid Trading API subscription
+  (₹499+taxes/month) unlocked it immediately, no code changes needed. The bot is now placing
+  real (paper) trades against live NSE prices. One early observation from live trading: the
+  MA(9,21) crossover strategy can whipsaw on flat/choppy price action (e.g. two trades 5 seconds
+  apart on sub-rupee MA differences) — not a bug, just a tuning consideration for a future phase.

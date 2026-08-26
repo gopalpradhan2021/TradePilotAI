@@ -181,11 +181,10 @@ def test_record_fill_increments_trade_count_and_pnl():
 def test_daily_loss_breach_triggers_exactly_one_notification(monkeypatch):
     calls = []
     monkeypatch.setattr(
-        risk_manager_module, "send_telegram_raw",
-        lambda token, chat_id, msg: calls.append(msg) or True,
+        risk_manager_module, "send_notification_raw",
+        lambda topic, msg: calls.append(msg) or True,
     )
-    rm = RiskManager(make_cfg(max_daily_loss_inr=1_000),
-                      telegram_bot_token="TOK", telegram_chat_id="CHAT")
+    rm = RiskManager(make_cfg(max_daily_loss_inr=1_000), ntfy_topic="my-topic")
 
     rm.record_fill(side=Side.SELL, order_value=500.0, pnl_delta=-1_200.0)
 
@@ -196,10 +195,10 @@ def test_daily_loss_breach_triggers_exactly_one_notification(monkeypatch):
 def test_manual_halt_triggers_exactly_one_notification(monkeypatch):
     calls = []
     monkeypatch.setattr(
-        risk_manager_module, "send_telegram_raw",
-        lambda token, chat_id, msg: calls.append(msg) or True,
+        risk_manager_module, "send_notification_raw",
+        lambda topic, msg: calls.append(msg) or True,
     )
-    rm = RiskManager(make_cfg(), telegram_bot_token="TOK", telegram_chat_id="CHAT")
+    rm = RiskManager(make_cfg(), ntfy_topic="my-topic")
 
     rm.manual_halt("test halt reason")
 

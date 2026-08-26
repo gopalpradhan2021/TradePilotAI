@@ -11,7 +11,7 @@ import time
 from config.settings import Settings
 from core.db import orders_repo, positions_repo, risk_repo
 from core.models import ProposedOrder, Side
-from core.notifier import send_telegram
+from core.notifier import send_notification
 from core.status_writer import write_heartbeat
 
 logger = logging.getLogger("groww_agent.orchestrator")
@@ -27,7 +27,7 @@ class Orchestrator:
 
     def _notify(self, message: str):
         try:
-            send_telegram(self.settings, message)
+            send_notification(self.settings, message)
         except Exception as e:
             logger.error("Failed to send notification: %s", e)
 

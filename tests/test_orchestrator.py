@@ -19,7 +19,7 @@ def make_settings(**risk_overrides):
         allow_fno=False,
     )
     defaults.update(risk_overrides)
-    return Settings(mode="PAPER", risk=RiskConfig(**defaults), telegram_bot_token="", telegram_chat_id="")
+    return Settings(mode="PAPER", risk=RiskConfig(**defaults), ntfy_topic="")
 
 
 class ScriptedStrategy(BaseStrategy):
@@ -155,7 +155,7 @@ def test_strategy_returning_none_does_not_create_order():
 
 def test_filled_order_triggers_exactly_one_notification(monkeypatch):
     calls = []
-    monkeypatch.setattr(orchestrator_module, "send_telegram", lambda settings, msg: calls.append(msg) or True)
+    monkeypatch.setattr(orchestrator_module, "send_notification", lambda settings, msg: calls.append(msg) or True)
 
     settings = make_settings()
     risk_manager = RiskManager(settings.risk)
@@ -172,7 +172,7 @@ def test_filled_order_triggers_exactly_one_notification(monkeypatch):
 
 def test_blocked_order_does_not_trigger_notification(monkeypatch):
     calls = []
-    monkeypatch.setattr(orchestrator_module, "send_telegram", lambda settings, msg: calls.append(msg) or True)
+    monkeypatch.setattr(orchestrator_module, "send_notification", lambda settings, msg: calls.append(msg) or True)
 
     settings = make_settings(max_trades_per_day=0)
     risk_manager = RiskManager(settings.risk)

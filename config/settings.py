@@ -20,8 +20,7 @@ class RiskConfig:
 class Settings:
     mode: str
     risk: RiskConfig
-    telegram_bot_token: str
-    telegram_chat_id: str
+    ntfy_topic: str
 
 
 def _float_env(key: str, default: float) -> float:
@@ -47,6 +46,5 @@ def load_settings() -> Settings:
     return Settings(
         mode=os.getenv("MODE", "PAPER").upper(),
         risk=risk,
-        telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
-        telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
+        ntfy_topic=os.getenv("NTFY_TOPIC", ""),
     )

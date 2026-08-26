@@ -19,7 +19,7 @@ from config.settings import load_settings
 from core.auth import get_client, GrowwAuthError
 from core.db.migrate import run_migrations
 from core.execution import PaperBroker, LiveBroker
-from core.notifier import send_telegram
+from core.notifier import send_notification
 from core.risk_manager import RiskManager
 from core.orchestrator import Orchestrator
 from strategies.ma_rsi_strategy import MARsiStrategy
@@ -61,11 +61,7 @@ def main():
         )
         sys.exit(1)
 
-    risk_manager = RiskManager(
-        settings.risk,
-        telegram_bot_token=settings.telegram_bot_token,
-        telegram_chat_id=settings.telegram_chat_id,
-    )
+    risk_manager = RiskManager(settings.risk, ntfy_topic=settings.ntfy_topic)
 
     if want_live:
         logger.warning("Starting in LIVE mode — real orders will be placed.")
@@ -88,7 +84,7 @@ def main():
     orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
 
     try:
-        send_telegram(settings, f"🟢 groww-bot started | mode={settings.mode} | symbols={args.symbols}")
+        send_notification(settings, f"🟢 groww-bot started | mode={settings.mode} | symbols={args.symbols}")
     except Exception as e:
         logger.error("Failed to send startup notification: %s", e)
 
