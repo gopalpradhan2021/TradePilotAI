@@ -8,9 +8,16 @@ Supports both CASH (equity) and FNO (futures & options) segments.
 import logging
 from abc import ABC, abstractmethod
 
+from growwapi.groww.exceptions import GrowwAPIAuthenticationException, GrowwAPIAuthorisationException
+
+from core.auth import get_client, GrowwAuthError
 from core.models import ProposedOrder, ExecutionResult, Segment
 
 logger = logging.getLogger("groww_agent.execution")
+
+
+class BrokerPositionFetchError(Exception):
+    pass
 
 
 def _groww_segment(client, segment: Segment):
@@ -91,17 +98,70 @@ class LiveBroker(Broker):
     def __init__(self, groww_client):
         self.client = groww_client
 
-    def get_ltp(self, symbol: str, segment: Segment = Segment.CASH) -> float | None:
+    def _reauth(self) -> bool:
         try:
-            quote = self.client.get_quote(
+            self.client = get_client()
+            logger.warning("[LIVE] Re-authentication succeeded — refreshed Groww client.")
+            return True
+        except GrowwAuthError as e:
+            logger.error("[LIVE] Re-authentication FAILED: %s", e)
+            return False
+
+    def get_ltp(self, symbol: str, segment: Segment = Segment.CASH) -> float | None:
+        def _call():
+            return self.client.get_quote(
                 exchange=self.client.EXCHANGE_NSE,
                 segment=_groww_segment(self.client, segment),
                 trading_symbol=symbol,
             )
-            return quote.get("last_price") or quote.get("ltp")
+
+        try:
+            quote = _call()
+        except (GrowwAPIAuthenticationException, GrowwAPIAuthorisationException) as e:
+            logger.error("LTP fetch auth error for %s (%s): %s — attempting re-auth.",
+                         symbol, segment.value, e)
+            if not self._reauth():
+                return None
+            try:
+                quote = _call()
+            except Exception as e2:
+                logger.error("LTP fetch FAILED after re-auth retry for %s (%s): %s",
+                             symbol, segment.value, e2)
+                return None
         except Exception as e:
             logger.error("LTP fetch failed for %s (%s): %s", symbol, segment.value, e)
             return None
+
+        return quote.get("last_price") or quote.get("ltp")
+
+    def get_broker_position(self, symbol: str, segment: Segment = Segment.CASH) -> dict:
+        """Returns {"symbol": symbol, "qty": <int>} — qty=0 means broker confirms flat.
+        Raises BrokerPositionFetchError (never returns None) on any fetch/auth failure, so
+        callers can't mistake 'fetch failed' for 'confirmed flat'."""
+        def _call():
+            return self.client.get_position_for_trading_symbol(
+                trading_symbol=symbol, segment=_groww_segment(self.client, segment),
+            )
+
+        try:
+            response = _call()
+        except (GrowwAPIAuthenticationException, GrowwAPIAuthorisationException) as e:
+            logger.error("[LIVE] Position fetch auth error for %s: %s — attempting re-auth.", symbol, e)
+            if not self._reauth():
+                raise BrokerPositionFetchError(
+                    f"Re-authentication failed fetching position for {symbol}"
+                ) from e
+            try:
+                response = _call()
+            except Exception as e2:
+                raise BrokerPositionFetchError(
+                    f"Position fetch failed after re-auth retry for {symbol}: {e2}"
+                ) from e2
+        except Exception as e:
+            raise BrokerPositionFetchError(f"Position fetch failed for {symbol}: {e}") from e
+
+        qty = (response or {}).get("quantity") or (response or {}).get("qty") or 0
+        return {"symbol": symbol, "qty": qty}
 
     def place_order(self, order: ProposedOrder, last_traded_price: float | None) -> ExecutionResult:
         trading_symbol = _build_trading_symbol(order)
@@ -112,11 +172,12 @@ class LiveBroker(Broker):
             order.segment.value, order.order_type.value, order.limit_price,
             order.idempotency_key, order.reason,
         )
-        try:
-            # TODO: consider passing order_reference_id=order.idempotency_key once it's
-            # confirmed Groww's API accepts a 36-char UUID (docstring implies an 8-digit
-            # numeric default; unverified whether a longer string is rejected).
-            response = self.client.place_order(
+
+        # TODO: consider passing order_reference_id=order.idempotency_key once it's
+        # confirmed Groww's API accepts a 36-char UUID (docstring implies an 8-digit
+        # numeric default; unverified whether a longer string is rejected).
+        def _call():
+            return self.client.place_order(
                 trading_symbol=trading_symbol,
                 quantity=order.total_units,
                 transaction_type=order.side.value,
@@ -127,15 +188,33 @@ class LiveBroker(Broker):
                 validity=self.client.VALIDITY_DAY,
                 price=order.limit_price,
             )
-            broker_order_id = response.get("groww_order_id") or response.get("order_id")
-            status = response.get("order_status", "PENDING")
-            logger.info("[LIVE] Order response: id=%s status=%s", broker_order_id, status)
-            return ExecutionResult(
-                order=order,
-                status=status,
-                broker_order_id=broker_order_id,
-                message=str(response),
-            )
+
+        try:
+            response = _call()
+        except (GrowwAPIAuthenticationException, GrowwAPIAuthorisationException) as e:
+            logger.error("[LIVE] Order placement failed due to auth error: %s — attempting re-auth.", e)
+            if not self._reauth():
+                return ExecutionResult(
+                    order=order, status="ERROR",
+                    message=f"Re-authentication failed after auth error: {e}",
+                )
+            try:
+                response = _call()
+            except Exception as e2:
+                logger.error("[LIVE] Order placement FAILED after re-auth retry: %s | order=%s", e2, order)
+                return ExecutionResult(
+                    order=order, status="ERROR", message=f"Auth retry failed: {e2}",
+                )
         except Exception as e:
             logger.error("[LIVE] Order placement FAILED: %s | order=%s", e, order)
             return ExecutionResult(order=order, status="ERROR", message=str(e))
+
+        broker_order_id = response.get("groww_order_id") or response.get("order_id")
+        status = response.get("order_status", "PENDING")
+        logger.info("[LIVE] Order response: id=%s status=%s", broker_order_id, status)
+        return ExecutionResult(
+            order=order,
+            status=status,
+            broker_order_id=broker_order_id,
+            message=str(response),
+        )

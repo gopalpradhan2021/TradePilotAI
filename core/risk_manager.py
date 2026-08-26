@@ -60,6 +60,17 @@ class RiskManager:
     def _deployed_capital(self) -> float:
         return positions_repo.get_deployed_capital()
 
+    def _halt(self, reason: str, source: str, log_prefix: str = "TRADING HALTED"):
+        self.halted = True
+        self.halt_reason = reason
+        self.halt_source = source
+        risk_repo.set_halted(self._current_day.isoformat(), True, reason, source=source)
+        risk_repo.record_risk_event(
+            order_id=None, symbol=None, event_type="HALTED", reasons=[reason],
+        )
+        logger.critical("%s: %s", log_prefix, reason)
+        self._notify(f"🔴 {log_prefix}: {reason}")
+
     def record_fill(self, side: Side, order_value: float, pnl_delta: float = 0.0,
                      order_id: int | None = None):
         trade_date = self._current_day.isoformat()
@@ -68,29 +79,21 @@ class RiskManager:
         self._realized_pnl_today += pnl_delta
 
         if self._realized_pnl_today <= -abs(self.cfg.max_daily_loss_inr):
-            self.halted = True
-            self.halt_reason = (
+            reason = (
                 f"Daily loss limit breached: {self._realized_pnl_today:.2f} "
                 f"<= -{self.cfg.max_daily_loss_inr}"
             )
-            self.halt_source = "AUTO"
-            risk_repo.set_halted(trade_date, True, self.halt_reason, source="AUTO")
-            risk_repo.record_risk_event(
-                order_id=order_id, symbol=None, event_type="HALTED", reasons=[self.halt_reason],
-            )
-            logger.critical("TRADING HALTED: %s", self.halt_reason)
-            self._notify(f"🔴 TRADING HALTED: {self.halt_reason}")
+            self._halt(reason, "AUTO")
 
     def manual_halt(self, reason: str = "manual kill switch"):
-        self.halted = True
-        self.halt_reason = reason
-        self.halt_source = "MANUAL"
-        risk_repo.set_halted(self._current_day.isoformat(), True, reason, source="MANUAL")
-        risk_repo.record_risk_event(
-            order_id=None, symbol=None, event_type="HALTED", reasons=[reason],
-        )
-        logger.critical("TRADING HALTED (manual): %s", reason)
-        self._notify(f"🔴 TRADING HALTED (manual): {reason}")
+        self._halt(reason, "MANUAL", log_prefix="TRADING HALTED (manual)")
+
+    def halt_circuit_breaker(self, consecutive_failures: int):
+        reason = f"Circuit breaker: {consecutive_failures} consecutive cycle failures."
+        self._halt(reason, "AUTO", log_prefix="TRADING HALTED (circuit breaker)")
+
+    def halt_reconciliation_mismatch(self, reason: str):
+        self._halt(reason, "AUTO", log_prefix="TRADING HALTED (reconciliation mismatch)")
 
     def resume(self, reason: str = "manual resume"):
         if not self.halted:

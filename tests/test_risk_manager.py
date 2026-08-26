@@ -261,3 +261,33 @@ def test_check_picks_up_external_resume_via_db():
 
     result = check(rm1, make_order(), ltp=100.0)
     assert result.approved
+
+
+def test_halt_circuit_breaker_sets_source_auto_and_notifies(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        risk_manager_module, "send_notification_raw",
+        lambda topic, msg: calls.append(msg) or True,
+    )
+    rm = RiskManager(make_cfg(), ntfy_topic="my-topic")
+
+    rm.halt_circuit_breaker(5)
+
+    assert rm.halted is True
+    assert rm.halt_source == "AUTO"
+    assert len(calls) == 1
+    assert "Circuit breaker" in calls[0]
+    assert "5" in calls[0]
+
+
+def test_halt_circuit_breaker_cannot_be_manually_resumed():
+    rm = RiskManager(make_cfg())
+    rm.halt_circuit_breaker(5)
+
+    try:
+        rm.resume("trying to bypass")
+        assert False, "expected RuntimeError"
+    except RuntimeError:
+        pass
+
+    assert rm.halted is True

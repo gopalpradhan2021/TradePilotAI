@@ -19,11 +19,36 @@ from config.settings import load_settings
 from core.auth import get_client, GrowwAuthError
 from core.db import positions_repo
 from core.db.migrate import run_migrations
-from core.execution import PaperBroker, LiveBroker
+from core.execution import PaperBroker, LiveBroker, BrokerPositionFetchError
 from core.notifier import send_notification
 from core.risk_manager import RiskManager
 from core.orchestrator import Orchestrator
 from strategies.ma_rsi_strategy import MARsiStrategy
+
+
+def reconcile_positions(broker, risk_manager, symbols: list[str], logger) -> None:
+    """Startup-only, LIVE-mode-only check: compares the local DB's open positions against
+    what the broker actually reports, and halts (AUTO — can't be casually resumed) on any
+    mismatch or fetch failure, since a divergence here means the local ledger can't be
+    trusted. Not run periodically during run_forever() — that's a larger, deliberately
+    deferred scope for a bot with no live date yet."""
+    for symbol in symbols:
+        local_pos = positions_repo.get_open_position(symbol)
+        local_qty = local_pos["qty"] if local_pos else 0
+        try:
+            broker_qty = broker.get_broker_position(symbol)["qty"]
+        except BrokerPositionFetchError as e:
+            reason = f"Reconciliation: could not fetch broker position for {symbol}: {e}"
+            logger.error(reason)
+            risk_manager.halt_reconciliation_mismatch(reason)
+            continue
+        if local_qty != broker_qty:
+            reason = (
+                f"Position mismatch at startup for {symbol}: "
+                f"local DB shows {local_qty}, broker reports {broker_qty}."
+            )
+            logger.critical("RECONCILIATION MISMATCH: %s", reason)
+            risk_manager.halt_reconciliation_mismatch(reason)
 
 
 def setup_logging():
@@ -72,6 +97,7 @@ def main():
             logger.error("Cannot start live trading — auth failed: %s", e)
             sys.exit(1)
         broker = LiveBroker(groww_client)
+        reconcile_positions(broker, risk_manager, args.symbols, logger)
     else:
         logger.info("Starting in PAPER mode — no real orders will be placed.")
         market_data_client = None

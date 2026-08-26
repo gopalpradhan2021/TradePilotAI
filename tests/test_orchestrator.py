@@ -2,7 +2,7 @@ import core.orchestrator as orchestrator_module
 from config.settings import RiskConfig, Settings
 from core.db import orders_repo, positions_repo
 from core.execution import PaperBroker
-from core.models import ProposedOrder, Side, OrderType
+from core.models import ProposedOrder, ExecutionResult, Side, OrderType
 from core.orchestrator import Orchestrator
 from core.risk_manager import RiskManager
 from strategies.base_strategy import BaseStrategy
@@ -40,6 +40,23 @@ class FixedPriceBroker(PaperBroker):
 
     def get_ltp(self, symbol, segment=None):
         return self._price
+
+
+class NonFillingBroker(FixedPriceBroker):
+    """Always returns a fixed non-FILLED ExecutionResult, for testing item-6 notifications."""
+
+    def __init__(self, price: float, status: str, message: str = "simulated"):
+        super().__init__(price)
+        self._status = status
+        self._message = message
+
+    def place_order(self, order, last_traded_price):
+        return ExecutionResult(order=order, status=self._status, message=self._message)
+
+
+class FailingStrategy(BaseStrategy):
+    def decide(self, symbol, last_traded_price):
+        raise RuntimeError("strategy blew up")
 
 
 def make_buy_order(symbol="RELIANCE", qty=1):
@@ -200,3 +217,104 @@ def test_external_halt_via_separate_risk_manager_stops_orchestrator():
 
     assert orders_repo.get_recent_orders(10) == []
     assert risk_manager.halted is True
+
+
+def test_error_order_triggers_notification(monkeypatch):
+    calls = []
+    monkeypatch.setattr(orchestrator_module, "send_notification", lambda settings, msg: calls.append(msg) or True)
+
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    broker = NonFillingBroker(price=100.0, status="ERROR", message="simulated failure")
+    strategy = ScriptedStrategy({"RELIANCE": [make_buy_order()]})
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+
+    orchestrator.run_once(symbols=["RELIANCE"])
+
+    assert len(calls) == 1
+    assert "ERROR" in calls[0]
+    assert "RELIANCE" in calls[0]
+
+
+def test_pending_order_triggers_notification(monkeypatch):
+    calls = []
+    monkeypatch.setattr(orchestrator_module, "send_notification", lambda settings, msg: calls.append(msg) or True)
+
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    broker = NonFillingBroker(price=100.0, status="PENDING", message="resting order")
+    strategy = ScriptedStrategy({"RELIANCE": [make_buy_order()]})
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+
+    orchestrator.run_once(symbols=["RELIANCE"])
+
+    assert len(calls) == 1
+    assert "PENDING" in calls[0]
+
+
+def test_run_cycle_resets_counter_on_success():
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=100.0)
+    strategy = ScriptedStrategy({"RELIANCE": [None]})
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+    orchestrator._consecutive_failures = 3
+
+    orchestrator._run_cycle(["RELIANCE"])
+
+    assert orchestrator._consecutive_failures == 0
+
+
+def test_run_cycle_increments_and_notifies_on_failure(monkeypatch):
+    calls = []
+    monkeypatch.setattr(orchestrator_module, "send_notification", lambda settings, msg: calls.append(msg) or True)
+
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=100.0)
+    orchestrator = Orchestrator(settings, broker, risk_manager, FailingStrategy())
+
+    orchestrator._run_cycle(["RELIANCE"])
+
+    assert orchestrator._consecutive_failures == 1
+    assert len(calls) == 1
+    assert risk_manager.halted is False
+
+
+def test_circuit_breaker_trips_at_threshold(monkeypatch):
+    monkeypatch.setattr(orchestrator_module, "send_notification", lambda settings, msg: True)
+
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=100.0)
+    orchestrator = Orchestrator(settings, broker, risk_manager, FailingStrategy())
+
+    for i in range(4):
+        orchestrator._run_cycle(["RELIANCE"])
+        assert risk_manager.halted is False, f"should not be halted after {i + 1} failures"
+
+    orchestrator._run_cycle(["RELIANCE"])
+
+    assert risk_manager.halted is True
+    assert risk_manager.halt_source == "AUTO"
+
+
+def test_circuit_breaker_resets_after_intervening_success(monkeypatch):
+    monkeypatch.setattr(orchestrator_module, "send_notification", lambda settings, msg: True)
+
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=100.0)
+    failing = Orchestrator(settings, broker, risk_manager, FailingStrategy())
+    succeeding_strategy = ScriptedStrategy({"RELIANCE": [None]})
+
+    failing._run_cycle(["RELIANCE"])
+    failing._run_cycle(["RELIANCE"])
+    failing.strategy = succeeding_strategy
+    failing._run_cycle(["RELIANCE"])
+    failing.strategy = FailingStrategy()
+    failing._run_cycle(["RELIANCE"])
+    failing._run_cycle(["RELIANCE"])
+
+    assert risk_manager.halted is False
+    assert failing._consecutive_failures == 2

@@ -1,7 +1,10 @@
 from datetime import date
 
-from core.execution import PaperBroker, LiveBroker, _build_trading_symbol
+import core.execution as execution_module
+from core.auth import GrowwAuthError
+from core.execution import PaperBroker, LiveBroker, BrokerPositionFetchError, _build_trading_symbol
 from core.models import ProposedOrder, Side, OrderType, Segment, OptionType
+from growwapi.groww.exceptions import GrowwAPIAuthenticationException
 
 
 def make_order(**overrides):
@@ -17,18 +20,38 @@ class FakeGrowwClient:
     PRODUCT_MIS = "MIS"
     VALIDITY_DAY = "DAY"
 
-    def __init__(self, response=None, raise_exc=None):
+    def __init__(self, response=None, raise_exc=None,
+                 quote_response=None, quote_raise_exc=None,
+                 position_response=None, position_raise_exc=None):
         self.calls = []
+        self.quote_calls = []
+        self.position_calls = []
         self._response = response if response is not None else {
             "groww_order_id": "ORD123", "order_status": "PENDING",
         }
         self._raise_exc = raise_exc
+        self._quote_response = quote_response if quote_response is not None else {"last_price": 100.0}
+        self._quote_raise_exc = quote_raise_exc
+        self._position_response = position_response if position_response is not None else {"quantity": 0}
+        self._position_raise_exc = position_raise_exc
 
     def place_order(self, **kwargs):
         self.calls.append(kwargs)
         if self._raise_exc is not None:
             raise self._raise_exc
         return self._response
+
+    def get_quote(self, **kwargs):
+        self.quote_calls.append(kwargs)
+        if self._quote_raise_exc is not None:
+            raise self._quote_raise_exc
+        return self._quote_response
+
+    def get_position_for_trading_symbol(self, **kwargs):
+        self.position_calls.append(kwargs)
+        if self._position_raise_exc is not None:
+            raise self._position_raise_exc
+        return self._position_response
 
 
 def test_paper_broker_fills_at_ltp_when_no_limit_price():
@@ -123,3 +146,99 @@ def test_live_broker_place_order_exception_returns_error_result():
     result = broker.place_order(make_order(), last_traded_price=150.0)
 
     assert result.status == "ERROR"
+
+
+def test_live_broker_reauth_and_retries_once_on_auth_exception(monkeypatch):
+    failing_client = FakeGrowwClient(raise_exc=GrowwAPIAuthenticationException())
+    new_client = FakeGrowwClient(response={"groww_order_id": "NEW1", "order_status": "FILLED"})
+    monkeypatch.setattr(execution_module, "get_client", lambda: new_client)
+
+    broker = LiveBroker(failing_client)
+    result = broker.place_order(make_order(), last_traded_price=150.0)
+
+    assert result.status == "FILLED"
+    assert result.broker_order_id == "NEW1"
+    assert broker.client is new_client
+    assert len(failing_client.calls) == 1
+    assert len(new_client.calls) == 1
+
+
+def test_live_broker_reauth_failure_returns_error(monkeypatch):
+    failing_client = FakeGrowwClient(raise_exc=GrowwAPIAuthenticationException())
+
+    def raise_auth_error():
+        raise GrowwAuthError("cannot get client")
+
+    monkeypatch.setattr(execution_module, "get_client", raise_auth_error)
+
+    broker = LiveBroker(failing_client)
+    result = broker.place_order(make_order(), last_traded_price=150.0)
+
+    assert result.status == "ERROR"
+    assert len(failing_client.calls) == 1  # no retry loop
+
+
+def test_live_broker_get_ltp_reauths_on_auth_exception(monkeypatch):
+    failing_client = FakeGrowwClient(quote_raise_exc=GrowwAPIAuthenticationException())
+    new_client = FakeGrowwClient(quote_response={"last_price": 175.5})
+    monkeypatch.setattr(execution_module, "get_client", lambda: new_client)
+
+    broker = LiveBroker(failing_client)
+    result = broker.get_ltp("RELIANCE")
+
+    assert result == 175.5
+    assert broker.client is new_client
+
+
+def test_get_broker_position_returns_qty_from_response():
+    client = FakeGrowwClient(position_response={"quantity": 5})
+    broker = LiveBroker(client)
+
+    assert broker.get_broker_position("RELIANCE") == {"symbol": "RELIANCE", "qty": 5}
+
+
+def test_get_broker_position_defaults_to_zero_when_absent():
+    client = FakeGrowwClient(position_response={})
+    broker = LiveBroker(client)
+
+    assert broker.get_broker_position("RELIANCE")["qty"] == 0
+
+
+def test_get_broker_position_raises_on_generic_error():
+    client = FakeGrowwClient(position_raise_exc=RuntimeError("network down"))
+    broker = LiveBroker(client)
+
+    try:
+        broker.get_broker_position("RELIANCE")
+        assert False, "expected BrokerPositionFetchError"
+    except BrokerPositionFetchError:
+        pass
+
+
+def test_get_broker_position_reauths_on_auth_exception(monkeypatch):
+    failing_client = FakeGrowwClient(position_raise_exc=GrowwAPIAuthenticationException())
+    new_client = FakeGrowwClient(position_response={"quantity": 3})
+    monkeypatch.setattr(execution_module, "get_client", lambda: new_client)
+
+    broker = LiveBroker(failing_client)
+    result = broker.get_broker_position("RELIANCE")
+
+    assert result == {"symbol": "RELIANCE", "qty": 3}
+    assert broker.client is new_client
+
+
+def test_get_broker_position_raises_when_reauth_fails(monkeypatch):
+    failing_client = FakeGrowwClient(position_raise_exc=GrowwAPIAuthenticationException())
+
+    def raise_auth_error():
+        raise GrowwAuthError("cannot get client")
+
+    monkeypatch.setattr(execution_module, "get_client", raise_auth_error)
+
+    broker = LiveBroker(failing_client)
+    try:
+        broker.get_broker_position("RELIANCE")
+        assert False, "expected BrokerPositionFetchError"
+    except BrokerPositionFetchError:
+        pass
+    assert len(failing_client.position_calls) == 1

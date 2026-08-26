@@ -18,12 +18,15 @@ logger = logging.getLogger("groww_agent.orchestrator")
 
 
 class Orchestrator:
+    _CIRCUIT_BREAKER_THRESHOLD = 5  # ~25s of continuous failure at the default 5s poll interval
+
     def __init__(self, settings: Settings, broker, risk_manager, strategy):
         self.settings = settings
         self.broker = broker
         self.risk_manager = risk_manager
         self.strategy = strategy
         self._last_ltp: dict[str, float | None] = {}
+        self._consecutive_failures = 0
 
     def _notify(self, message: str):
         try:
@@ -119,14 +122,31 @@ class Orchestrator:
                 self.risk_manager.record_fill(
                     side=order.side, order_value=order_value, pnl_delta=pnl_delta, order_id=order_id
                 )
+        else:
+            self._notify(
+                f"⚠️ Order NOT filled: {order.side.value} {order.qty} {order.symbol} "
+                f"status={result.status} message={result.message} (mode={self.settings.mode})"
+            )
+
+    def _run_cycle(self, symbols: list[str]):
+        try:
+            self.run_once(symbols)
+            self._consecutive_failures = 0
+        except Exception as e:
+            self._consecutive_failures += 1
+            logger.exception("Unhandled error in run_once (%d consecutive): %s",
+                              self._consecutive_failures, e)
+            self._notify(
+                f"🔴 groww-bot crashed in run_once ({self._consecutive_failures} consecutive): {e}"
+            )
+            if self._consecutive_failures >= self._CIRCUIT_BREAKER_THRESHOLD:
+                logger.critical("Circuit breaker tripped after %d consecutive failures — halting.",
+                                 self._consecutive_failures)
+                self.risk_manager.halt_circuit_breaker(self._consecutive_failures)
 
     def run_forever(self, symbols: list[str], poll_interval_sec: int = 5):
         logger.info("Starting orchestrator loop | mode=%s | symbols=%s",
                     self.settings.mode, symbols)
         while True:
-            try:
-                self.run_once(symbols)
-            except Exception as e:
-                logger.exception("Unhandled error in run_once: %s", e)
-                self._notify(f"🔴 groww-bot crashed in run_once: {e}")
+            self._run_cycle(symbols)
             time.sleep(poll_interval_sec)
