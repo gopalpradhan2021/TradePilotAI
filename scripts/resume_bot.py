@@ -15,7 +15,7 @@ from core.risk_manager import RiskManager
 def main():
     reason = " ".join(sys.argv[1:]) or "manual resume"
     settings = load_settings()
-    rm = RiskManager(settings.risk, ntfy_topic=settings.ntfy_topic)
+    rm = RiskManager(settings.risk, ntfy_topic=settings.ntfy_topic, mode=settings.mode)
     if not rm.halted:
         print(f"Not currently halted — nothing to resume. trade_date={rm._current_day.isoformat()}")
         return

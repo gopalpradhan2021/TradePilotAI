@@ -79,6 +79,25 @@ def test_daily_trade_count_cap():
     assert any("Daily trade count limit" in r for r in result.reasons)
 
 
+def test_daily_trade_count_cap_not_enforced_in_paper_mode():
+    """Paper trading risks no real money — the cap exists to protect capital, so it's
+    deliberately not enforced there, letting the strategy's true trade frequency show
+    through for future tuning."""
+    rm = RiskManager(make_cfg(max_trades_per_day=1), mode="PAPER")
+    rm._trades_today = 5  # already well past the configured cap
+    result = check(rm, make_order(), ltp=100.0)
+    assert result.approved
+
+
+def test_daily_trade_count_cap_still_enforced_when_mode_unspecified():
+    """mode defaults to LIVE (the conservative choice) so any caller that doesn't pass it
+    — including any code added later — keeps the cap enforced rather than silently losing it."""
+    rm = RiskManager(make_cfg(max_trades_per_day=1))
+    rm._trades_today = 1
+    result = check(rm, make_order(), ltp=100.0)
+    assert not result.approved
+
+
 def test_order_value_cap():
     rm = RiskManager(make_cfg(max_order_value_inr=500))
     result = check(rm, make_order(qty=10), ltp=100.0)  # order value = 1000

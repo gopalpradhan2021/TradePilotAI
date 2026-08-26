@@ -74,7 +74,7 @@ def main():
         )
         sys.exit(1)
 
-    risk_manager = RiskManager(settings.risk, ntfy_topic=settings.ntfy_topic)
+    risk_manager = RiskManager(settings.risk, ntfy_topic=settings.ntfy_topic, mode=settings.mode)
 
     if want_live:
         logger.warning("Starting in LIVE mode — real orders will be placed.")

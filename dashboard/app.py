@@ -3,6 +3,7 @@ Lightweight status dashboard for the trading bot.
 Run: uvicorn dashboard.app:app --host 0.0.0.0 --port 8000
 """
 import json
+import logging
 import os
 import secrets
 import subprocess
@@ -24,6 +25,8 @@ from core.status_writer import read_heartbeat
 
 load_dotenv()
 
+logger = logging.getLogger("groww_agent.dashboard")
+
 app = FastAPI(title="Groww Agent Dashboard")
 
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
@@ -33,8 +36,7 @@ if not os.getenv("SESSION_SECRET_KEY"):
     # network attacker to be a real improvement — but a secret that changes every process
     # restart means every operator gets logged out on each deploy. Warn rather than silently
     # degrade UX; still safe to run without it (a fresh random key per boot), just annoying.
-    import logging
-    logging.getLogger("groww_agent.dashboard").warning(
+    logger.warning(
         "SESSION_SECRET_KEY not set in .env — using a random key that changes on every "
         "restart, so operators will be logged out each deploy. Set SESSION_SECRET_KEY to a "
         "long random string to avoid that."
@@ -107,7 +109,7 @@ def _risk_manager() -> RiskManager:
     Orchestrator re-reads every cycle via RiskManager.refresh_halt_state(), so the
     dashboard needs no direct connection to the bot process."""
     settings = load_settings()
-    return RiskManager(settings.risk, ntfy_topic=settings.ntfy_topic)
+    return RiskManager(settings.risk, ntfy_topic=settings.ntfy_topic, mode=settings.mode)
 
 
 def _render_login_page(error: str | None = None) -> str:
@@ -178,7 +180,7 @@ def _run_backtest_subprocess(symbols: list[str], start: str, end: str, interval:
     process at a scratch DATABASE_PATH by mutating os.environ — safe for a short-lived CLI
     process, but the dashboard is a long-running server handling concurrent requests against the
     REAL database on every other endpoint, so mutating that env var in-process here would risk a
-    concurrent /api/status or /api/halt call reading/writing the wrong database."""
+    concurrent /api/status or /api/bot/stop call reading/writing the wrong database."""
     fd, out_path = tempfile.mkstemp(suffix=".json")
     os.close(fd)
     try:
@@ -217,14 +219,18 @@ def _render(status: dict) -> str:
     pnl_color = "#e74c3c" if status.get("realized_pnl_today", 0) < 0 else "#2ecc71"
 
     if halted and halt_source == "MANUAL":
-        switch_button = '<button id="switch-btn" class="switch-btn resume" onclick="doResume()">Resume trading</button>'
+        switch_button = '<button id="switch-btn" class="switch-btn resume" onclick="doStart()">Start</button>'
     elif halted:
         switch_button = ('<button class="switch-btn resume" disabled '
                           'title="Automatic halts (daily loss limit, circuit breaker, '
                           'reconciliation mismatch) can only clear on the next trading day, '
-                          'not from here.">Resume trading (auto halt)</button>')
+                          'not from here.">Start (auto halt)</button>')
     else:
-        switch_button = '<button id="switch-btn" class="switch-btn halt" onclick="doHalt()">Halt trading</button>'
+        switch_button = '<button id="switch-btn" class="switch-btn halt" onclick="doStop()">Stop</button>'
+
+    proc_status = status.get("bot_process_status", "unknown")
+    proc_color = {"active": "#2ecc71", "inactive": "#8b949e", "failed": "#e74c3c"}.get(proc_status, "#8b949e")
+    proc_badge = f'<span class="proc-badge" style="color:{proc_color};" title="groww-bot.service">process: {proc_status}</span>'
 
     mkt_state, mkt_label, now_ist = market_status_ist()
     mkt_color = {"OPEN": "#2ecc71", "PRE-OPEN": "#f39c12",
@@ -296,6 +302,7 @@ def _render(status: dict) -> str:
         .switch-btn.halt {{ background: #e74c3c; color: #fff; }}
         .switch-btn.resume {{ background: #2ecc71; color: #0d1117; }}
         .switch-btn:disabled {{ background: #30363d; color: #8b949e; cursor: not-allowed; }}
+        .proc-badge {{ margin-left: 8px; font-family: 'SF Mono', Consolas, monospace; font-size: 0.8rem; }}
     </style>
     <script>
         function tickClock() {{
@@ -308,15 +315,21 @@ def _render(status: dict) -> str:
         }}
         setInterval(tickClock, 1000);
 
-        async function postAction(path, reason) {{
+        async function postBotAction(path, reason) {{
             const url = `${{path}}?reason=${{encodeURIComponent(reason)}}`;
             const btn = document.getElementById('switch-btn');
             if (btn) btn.disabled = true;
             try {{
                 const res = await fetch(url, {{ method: 'POST' }});
+                const body = await res.json().catch(() => ({{}}));
                 if (!res.ok) {{
-                    const body = await res.json().catch(() => ({{}}));
                     alert('Failed: ' + (body.detail || res.statusText));
+                }} else if (body.process_error) {{
+                    alert('Trading action succeeded, but the bot PROCESS could not be ' +
+                          'controlled (needs the one-time sudo setup): ' + body.process_error);
+                }} else if (body.trade_error) {{
+                    alert('Bot process action succeeded, but trading could not be resumed: ' +
+                          body.trade_error);
                 }}
             }} catch (e) {{
                 alert('Request failed: ' + e);
@@ -325,23 +338,24 @@ def _render(status: dict) -> str:
             }}
         }}
 
-        function doHalt() {{
-            const reason = prompt('Reason for halting the bot?', 'manual kill switch (dashboard)');
+        function doStop() {{
+            const reason = prompt('Reason for stopping?', 'manual stop (dashboard)');
             if (reason === null) return;
-            if (!confirm('Halt live trading now? No new orders will be placed until resumed.')) return;
-            postAction('/api/halt', reason);
+            if (!confirm('Stop the bot now? No new orders will be placed, and the process ' +
+                         'will be stopped too if the dashboard has permission to do so.')) return;
+            postBotAction('/api/bot/stop', reason);
         }}
 
-        function doResume() {{
-            const reason = prompt('Reason for resuming the bot?', 'manual resume (dashboard)');
+        function doStart() {{
+            const reason = prompt('Reason for starting?', 'manual start (dashboard)');
             if (reason === null) return;
-            if (!confirm('Resume trading now?')) return;
-            postAction('/api/resume', reason);
+            if (!confirm('Start the bot now?')) return;
+            postBotAction('/api/bot/start', reason);
         }}
     </script>
 </head>
 <body>
-    <h1>Groww Trading Agent <span class="badge">{status_text}</span>{switch_button}</h1>
+    <h1>Groww Trading Agent <span class="badge">{status_text}</span>{switch_button} {proc_badge}</h1>
     <p>
         <a href="/backtest" style="color:#58a6ff;">Backtest &amp; market replay →</a>
         <a href="/logout" style="color:#8b949e; margin-left:16px; font-size:0.85rem;">Log out</a>
@@ -431,6 +445,7 @@ def _build_status_view() -> dict:
     return {
         "updated_at": heartbeat.get("updated_at"),
         "mode": heartbeat.get("mode", "UNKNOWN"),
+        "bot_process_status": _bot_process_status(),
         "halted": bool(daily["halted"]),
         "halt_reason": daily["halt_reason"],
         "halt_source": daily.get("halt_source", "AUTO"),
@@ -464,25 +479,65 @@ def api_status(request: Request):
     return _build_status_view()
 
 
-@app.post("/api/halt")
-def api_halt(request: Request, reason: str = "manual kill switch (dashboard)"):
+def _bot_process_status() -> str:
+    """Read-only — `systemctl is-active` needs no special privilege, unlike start/stop."""
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", "groww-bot.service"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return (result.stdout or "unknown").strip()
+    except Exception as e:
+        logger.error("Failed to check groww-bot.service status: %s", e)
+        return "unknown"
+
+
+def _control_bot_process(action: str) -> tuple[bool, str | None]:
+    """action: "start" or "stop". Requires the dashboard's OS user to have a one-time,
+    narrowly-scoped sudoers rule for exactly these two systemctl commands — see the operator
+    setup notes. Without it, this fails cleanly and callers still apply the trading
+    halt/resume half of the action, which needs no special privilege at all."""
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "systemctl", action, "groww-bot.service"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return False, (result.stderr or result.stdout or "unknown error").strip()
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+@app.post("/api/bot/stop")
+def api_bot_stop(request: Request, reason: str = "manual stop (dashboard)"):
     _require_api_auth(request)
     rm = _risk_manager()
     rm.manual_halt(reason)
-    return JSONResponse({"halted": True, "halt_source": "MANUAL", "halt_reason": reason})
+    process_ok, process_err = _control_bot_process("stop")
+    return JSONResponse({
+        "halted": True, "halt_source": "MANUAL", "halt_reason": reason,
+        "process_stopped": process_ok, "process_error": process_err,
+    })
 
 
-@app.post("/api/resume")
-def api_resume(request: Request, reason: str = "manual resume (dashboard)"):
+@app.post("/api/bot/start")
+def api_bot_start(request: Request, reason: str = "manual start (dashboard)"):
     _require_api_auth(request)
+    process_ok, process_err = _control_bot_process("start")
+
     rm = _risk_manager()
-    if not rm.halted:
-        return JSONResponse({"halted": False, "message": "Not currently halted."})
-    try:
-        rm.resume(reason)
-    except RuntimeError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-    return JSONResponse({"halted": False})
+    trade_error = None
+    if rm.halted:
+        try:
+            rm.resume(reason)
+        except RuntimeError as e:
+            trade_error = str(e)
+
+    return JSONResponse({
+        "halted": rm.halted, "process_started": process_ok, "process_error": process_err,
+        "trade_error": trade_error,
+    })
 
 
 def _render_backtest_page(form: dict, result: dict | None, error: str | None) -> str:

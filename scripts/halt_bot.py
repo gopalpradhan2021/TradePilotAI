@@ -22,7 +22,7 @@ logger = logging.getLogger("groww_agent.halt_bot")
 def main():
     reason = " ".join(sys.argv[1:]) or "manual kill switch"
     settings = load_settings()
-    rm = RiskManager(settings.risk, ntfy_topic=settings.ntfy_topic)
+    rm = RiskManager(settings.risk, ntfy_topic=settings.ntfy_topic, mode=settings.mode)
     rm.manual_halt(reason)
     print(f"HALTED. reason={reason!r} halt_source=MANUAL trade_date={rm._current_day.isoformat()}")
 

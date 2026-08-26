@@ -85,7 +85,7 @@ def test_throttle_blocks_after_max_failed_attempts():
     assert status_response.status_code == 401
 
 
-def test_api_halt_requires_auth():
+def test_api_bot_stop_requires_auth():
     client = make_client()
-    response = client.post("/api/halt")
+    response = client.post("/api/bot/stop")
     assert response.status_code == 401

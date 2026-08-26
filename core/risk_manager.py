@@ -22,13 +22,22 @@ logger = logging.getLogger("groww_agent.risk")
 
 class RiskManager:
     def __init__(self, risk_config: RiskConfig, ntfy_topic: str = "",
-                 today_fn: Callable[[], date] = date.today):
+                 today_fn: Callable[[], date] = date.today, mode: str = "LIVE"):
         """today_fn defaults to the real wall-clock date; scripts/backtest.py injects a
         simulated clock instead, so day-rollover (and the daily counters it resets) tracks
-        simulated historical days rather than the backtest process's real run time."""
+        simulated historical days rather than the backtest process's real run time.
+
+        mode defaults to "LIVE" (the conservative choice — enforce every cap unless told
+        otherwise) so existing callers that don't pass it keep today's behavior unchanged.
+        main.py passes the real settings.mode; when it's "PAPER", max_trades_per_day stops
+        being enforced (see check()) — paper trading risks no real money, so the cap exists
+        only to make the strategy's true, unconstrained trade frequency visible for future
+        tuning, not to protect anything. LIVE mode always enforces it regardless of what's
+        passed here as a defense against a mistaken/missing mode value."""
         self.cfg = risk_config
         self._ntfy_topic = ntfy_topic
         self._today_fn = today_fn
+        self.mode = mode
         self._current_day = self._today_fn()
         self._sync_daily_state()
 
@@ -150,7 +159,7 @@ class RiskManager:
                 f"exceeds max_position_qty {self.cfg.max_position_qty}."
             )
 
-        if self._trades_today >= self.cfg.max_trades_per_day:
+        if self.mode != "PAPER" and self._trades_today >= self.cfg.max_trades_per_day:
             reasons.append(
                 f"Daily trade count limit reached ({self.cfg.max_trades_per_day})."
             )
