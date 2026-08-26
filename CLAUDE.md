@@ -202,4 +202,34 @@ This codebase is being developed in phases (Phase 0–6+ as tracked by the user 
   noise, not a real trend). Fixed in `strategies/ma_rsi_strategy.py` with `MIN_CROSSOVER_GAP_PCT`
   (minimum relative MA gap to count as a real crossover) and `COOLDOWN_SECONDS` (minimum
   wall-clock time after an exit before re-entry).
-- **Phases 4+** not yet scoped.
+- **Phase 4 (done)** — live-trading readiness audit and fixes, in two rounds:
+  - Critical: `LiveBroker.place_order()` was calling the Groww SDK without its required
+    `validity`/`exchange`/`product` args (every real order would have raised `TypeError`,
+    silently caught and returned as a generic `ERROR` — never reached Groww). Fixed, using
+    `PRODUCT_MIS` (matches the strategy's same-session entry/exit design) and `VALIDITY_DAY`.
+    Also fixed F&O orders sending `qty` instead of `total_units` (`qty * lot_size`).
+  - Added an operator kill-switch (`scripts/halt_bot.py`/`scripts/resume_bot.py`) backed by a
+    `daily_summary.halt_source` column (`"MANUAL"` vs `"AUTO"`) and
+    `RiskManager.refresh_halt_state()` (called every `check()` and at the top of
+    `Orchestrator.run_once()`), so an externally-triggered halt/resume takes effect on the
+    running bot within one poll cycle, not just on day rollover. `resume()` refuses to clear an
+    `"AUTO"` halt (daily-loss breach, circuit breaker, reconciliation mismatch) — only
+    `"MANUAL"` halts can be manually cleared.
+  - Added `BaseStrategy.restore_position()` (default no-op, overridden in `MARsiStrategy`),
+    called from `main.py` at startup for any already-open position, so a restart no longer
+    causes the strategy to think it's flat and risk a duplicate entry.
+  - Non-FILLED order results (`ERROR`, `REJECTED`, `PENDING`) now trigger a notification —
+    previously only fills were notified.
+  - `LiveBroker` re-authenticates and retries exactly once on
+    `GrowwAPIAuthenticationException`/`GrowwAPIAuthorisationException`, in `get_ltp()`,
+    `place_order()`, and `get_broker_position()`.
+  - `Orchestrator` tracks consecutive `run_once()` failures; 5 in a row trips a circuit breaker
+    (`RiskManager.halt_circuit_breaker()`, `"AUTO"`-sourced).
+  - Startup-only, LIVE-mode-only reconciliation (`main.reconcile_positions()`): compares each
+    traded symbol's local open position against `LiveBroker.get_broker_position()`, halting via
+    `RiskManager.halt_reconciliation_mismatch()` on any mismatch or fetch failure. Deliberately
+    not periodic — no live date yet, larger scope deferred.
+  - `RiskManager._halt()` is now a single private helper shared by `manual_halt()`,
+    `record_fill()`'s daily-loss branch, `halt_circuit_breaker()`, and
+    `halt_reconciliation_mismatch()` — was duplicated inline in two places before this round.
+- **Phases 5+** not yet scoped.
