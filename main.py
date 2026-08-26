@@ -17,6 +17,7 @@ import sys
 
 from config.settings import load_settings
 from core.auth import get_client, GrowwAuthError
+from core.db import positions_repo
 from core.db.migrate import run_migrations
 from core.execution import PaperBroker, LiveBroker
 from core.notifier import send_notification
@@ -81,6 +82,13 @@ def main():
         broker = PaperBroker(market_data_client=market_data_client)
 
     strategy = MARsiStrategy()
+
+    for symbol in args.symbols:
+        open_pos = positions_repo.get_open_position(symbol)
+        if open_pos is not None:
+            strategy.restore_position(symbol, entry_price=open_pos["entry_price"])
+            logger.info("Restored open position for %s @ entry %.2f", symbol, open_pos["entry_price"])
+
     orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
 
     try:

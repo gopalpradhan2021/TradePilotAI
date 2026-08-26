@@ -38,6 +38,7 @@ class RiskManager:
         self._realized_pnl_today = summary["realized_pnl"]
         self.halted = bool(summary["halted"])
         self.halt_reason = summary["halt_reason"]
+        self.halt_source = summary.get("halt_source", "AUTO")
 
     def _roll_day_if_needed(self):
         today = date.today()
@@ -45,6 +46,15 @@ class RiskManager:
             self._current_day = today
             self._sync_daily_state()
             logger.info("New trading day — risk counters reset.")
+
+    def refresh_halt_state(self):
+        """Re-reads halted/halt_reason/halt_source from the DB unconditionally, so a halt
+        or resume triggered by a separate process (scripts/halt_bot.py, scripts/resume_bot.py)
+        takes effect on this process within one call, not just on day rollover."""
+        db_state = risk_repo.get_halt_state(self._current_day.isoformat())
+        self.halted = bool(db_state["halted"])
+        self.halt_reason = db_state["halt_reason"]
+        self.halt_source = db_state["halt_source"]
 
     @property
     def _deployed_capital(self) -> float:
@@ -63,7 +73,8 @@ class RiskManager:
                 f"Daily loss limit breached: {self._realized_pnl_today:.2f} "
                 f"<= -{self.cfg.max_daily_loss_inr}"
             )
-            risk_repo.set_halted(trade_date, True, self.halt_reason)
+            self.halt_source = "AUTO"
+            risk_repo.set_halted(trade_date, True, self.halt_reason, source="AUTO")
             risk_repo.record_risk_event(
                 order_id=order_id, symbol=None, event_type="HALTED", reasons=[self.halt_reason],
             )
@@ -73,16 +84,38 @@ class RiskManager:
     def manual_halt(self, reason: str = "manual kill switch"):
         self.halted = True
         self.halt_reason = reason
-        risk_repo.set_halted(self._current_day.isoformat(), True, reason)
+        self.halt_source = "MANUAL"
+        risk_repo.set_halted(self._current_day.isoformat(), True, reason, source="MANUAL")
         risk_repo.record_risk_event(
             order_id=None, symbol=None, event_type="HALTED", reasons=[reason],
         )
         logger.critical("TRADING HALTED (manual): %s", reason)
         self._notify(f"🔴 TRADING HALTED (manual): {reason}")
 
+    def resume(self, reason: str = "manual resume"):
+        if not self.halted:
+            logger.warning("resume() called but not currently halted — no-op.")
+            return
+        if self.halt_source != "MANUAL":
+            raise RuntimeError(
+                f"Refusing to resume: current halt was automatic ({self.halt_reason!r}). "
+                "Automatic halts (e.g. daily loss limit) can only clear via the next "
+                "trading day's rollover, not a manual resume — this is intentional."
+            )
+        self.halted = False
+        self.halt_reason = ""
+        self.halt_source = "AUTO"
+        risk_repo.set_halted(self._current_day.isoformat(), False, "", source="AUTO")
+        risk_repo.record_risk_event(
+            order_id=None, symbol=None, event_type="HALT_CLEARED", reasons=[reason],
+        )
+        logger.warning("TRADING RESUMED (manual): %s", reason)
+        self._notify(f"🟢 TRADING RESUMED (manual): {reason}")
+
     def check(self, order: ProposedOrder, last_traded_price: float | None,
               order_id: int) -> RiskCheckResult:
         self._roll_day_if_needed()
+        self.refresh_halt_state()
         reasons = []
 
         if self.halted:

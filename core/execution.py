@@ -17,6 +17,12 @@ def _groww_segment(client, segment: Segment):
     return client.SEGMENT_FNO if segment == Segment.FNO else client.SEGMENT_CASH
 
 
+def _groww_product(client, segment: Segment):
+    # FNO product selection is a placeholder — ALLOW_FNO is off by default and not in
+    # active use; revisit (PRODUCT_NRML vs PRODUCT_MIS) if F&O is enabled.
+    return client.PRODUCT_MIS
+
+
 def _build_trading_symbol(order: ProposedOrder) -> str:
     if order.segment == Segment.CASH:
         return order.symbol
@@ -100,18 +106,25 @@ class LiveBroker(Broker):
     def place_order(self, order: ProposedOrder, last_traded_price: float | None) -> ExecutionResult:
         trading_symbol = _build_trading_symbol(order)
         logger.info(
-            "[LIVE] Submitting order: %s %s x%s segment=%s lot=%s type=%s limit=%s key=%s reason=%s",
-            order.side.value, trading_symbol, order.qty, order.segment.value,
-            order.lot_size, order.order_type.value, order.limit_price,
+            "[LIVE] Submitting order: %s %s qty=%s lot=%s total_units=%s segment=%s type=%s "
+            "limit=%s key=%s reason=%s",
+            order.side.value, trading_symbol, order.qty, order.lot_size, order.total_units,
+            order.segment.value, order.order_type.value, order.limit_price,
             order.idempotency_key, order.reason,
         )
         try:
+            # TODO: consider passing order_reference_id=order.idempotency_key once it's
+            # confirmed Groww's API accepts a 36-char UUID (docstring implies an 8-digit
+            # numeric default; unverified whether a longer string is rejected).
             response = self.client.place_order(
                 trading_symbol=trading_symbol,
-                quantity=order.qty,
+                quantity=order.total_units,
                 transaction_type=order.side.value,
                 order_type=order.order_type.value,
                 segment=_groww_segment(self.client, order.segment),
+                exchange=self.client.EXCHANGE_NSE,
+                product=_groww_product(self.client, order.segment),
+                validity=self.client.VALIDITY_DAY,
                 price=order.limit_price,
             )
             broker_order_id = response.get("groww_order_id") or response.get("order_id")

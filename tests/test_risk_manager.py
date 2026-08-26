@@ -204,3 +204,60 @@ def test_manual_halt_triggers_exactly_one_notification(monkeypatch):
 
     assert len(calls) == 1
     assert "test halt reason" in calls[0]
+
+
+def test_manual_halt_sets_source_manual():
+    rm = RiskManager(make_cfg())
+    rm.manual_halt("test")
+    assert rm.halt_source == "MANUAL"
+
+
+def test_record_fill_daily_loss_halt_sets_source_auto():
+    rm = RiskManager(make_cfg(max_daily_loss_inr=1_000))
+    rm.record_fill(side=Side.SELL, order_value=500.0, pnl_delta=-1_200.0)
+    assert rm.halt_source == "AUTO"
+
+
+def test_resume_clears_manual_halt():
+    rm = RiskManager(make_cfg())
+    rm.manual_halt("test")
+    rm.resume("all clear")
+
+    assert rm.halted is False
+    result = check(rm, make_order(), ltp=100.0)
+    assert result.approved
+
+
+def test_resume_raises_on_automatic_halt():
+    rm = RiskManager(make_cfg(max_daily_loss_inr=1_000))
+    rm.record_fill(side=Side.SELL, order_value=500.0, pnl_delta=-1_200.0)
+
+    try:
+        rm.resume("trying to bypass")
+        assert False, "expected RuntimeError"
+    except RuntimeError:
+        pass
+
+    assert rm.halted is True
+
+
+def test_check_picks_up_external_halt_via_db():
+    rm1 = RiskManager(make_cfg())
+    rm2 = RiskManager(make_cfg())  # simulates scripts/halt_bot.py running separately
+
+    rm2.manual_halt("external halt")
+
+    result = check(rm1, make_order(), ltp=100.0)
+    assert not result.approved
+    assert rm1.halt_source == "MANUAL"
+
+
+def test_check_picks_up_external_resume_via_db():
+    rm1 = RiskManager(make_cfg())
+    rm1.manual_halt("initial halt")
+
+    rm2 = RiskManager(make_cfg())  # simulates scripts/resume_bot.py running separately
+    rm2.resume("external resume")
+
+    result = check(rm1, make_order(), ltp=100.0)
+    assert result.approved

@@ -183,3 +183,20 @@ def test_blocked_order_does_not_trigger_notification(monkeypatch):
     orchestrator.run_once(symbols=["RELIANCE"])
 
     assert calls == []
+
+
+def test_external_halt_via_separate_risk_manager_stops_orchestrator():
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)  # the orchestrator's own instance, not halted
+    broker = FixedPriceBroker(price=100.0)
+    strategy = ScriptedStrategy({"RELIANCE": [make_buy_order()]})
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+
+    # Simulates scripts/halt_bot.py running as a separate process against the same DB.
+    external_risk_manager = RiskManager(settings.risk)
+    external_risk_manager.manual_halt("external halt")
+
+    orchestrator.run_once(symbols=["RELIANCE"])
+
+    assert orders_repo.get_recent_orders(10) == []
+    assert risk_manager.halted is True

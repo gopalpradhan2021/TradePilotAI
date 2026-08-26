@@ -240,3 +240,24 @@ def test_exit_signal_ignores_cooldown(monkeypatch):
     assert order is not None
     assert order.side == Side.SELL
     assert strategy._get_state("RELIANCE").in_position is False
+
+
+# --- restore_position (restart recovery) --------------------------------
+
+def test_restore_position_sets_in_position_and_entry_price():
+    strategy = MARsiStrategy()
+    strategy.restore_position("RELIANCE", 150.0)
+
+    state = strategy._get_state("RELIANCE")
+    assert state.in_position is True
+    assert state.entry_price == 150.0
+
+
+def test_restore_position_leaves_ma_history_at_defaults():
+    strategy = MARsiStrategy()
+    strategy.restore_position("RELIANCE", 150.0)
+
+    state = strategy._get_state("RELIANCE")
+    assert state.prev_short_ma is None
+    assert state.prev_long_ma is None
+    assert state.last_exit_time is None

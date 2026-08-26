@@ -32,6 +32,7 @@ class Orchestrator:
             logger.error("Failed to send notification: %s", e)
 
     def run_once(self, symbols: list[str]):
+        self.risk_manager.refresh_halt_state()
         if self.risk_manager.halted:
             logger.warning("Skipping cycle — risk manager is halted: %s",
                             self.risk_manager.halt_reason)

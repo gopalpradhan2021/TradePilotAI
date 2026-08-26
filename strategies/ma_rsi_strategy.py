@@ -82,6 +82,12 @@ class MARsiStrategy(BaseStrategy):
             self._state[symbol] = SymbolState()
         return self._state[symbol]
 
+    def restore_position(self, symbol: str, entry_price: float) -> None:
+        state = self._get_state(symbol)
+        state.in_position = True
+        state.entry_price = entry_price
+        logger.info("%s: restored open position on startup, entry_price=%.2f", symbol, entry_price)
+
     def decide(self, symbol: str, last_traded_price: float | None) -> ProposedOrder | None:
         if last_traded_price is None:
             return None

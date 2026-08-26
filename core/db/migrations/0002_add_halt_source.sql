@@ -1,0 +1,1 @@
+ALTER TABLE daily_summary ADD COLUMN halt_source TEXT NOT NULL DEFAULT 'AUTO';

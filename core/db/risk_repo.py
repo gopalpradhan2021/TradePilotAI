@@ -20,15 +20,15 @@ def get_or_create_daily_summary(trade_date: str) -> dict:
         conn.execute(
             """
             INSERT INTO daily_summary
-                (trade_date, trades_count, realized_pnl, halted, halt_reason, created_at, updated_at)
-            VALUES (?, 0, 0, 0, '', ?, ?)
+                (trade_date, trades_count, realized_pnl, halted, halt_reason, halt_source, created_at, updated_at)
+            VALUES (?, 0, 0, 0, '', 'AUTO', ?, ?)
             """,
             (trade_date, now, now),
         )
         conn.commit()
         return {
             "trade_date": trade_date, "trades_count": 0, "realized_pnl": 0.0,
-            "halted": 0, "halt_reason": "", "created_at": now, "updated_at": now,
+            "halted": 0, "halt_reason": "", "halt_source": "AUTO", "created_at": now, "updated_at": now,
         }
 
 
@@ -45,13 +45,27 @@ def increment_daily_counters(trade_date: str, pnl_delta: float) -> None:
         conn.commit()
 
 
-def set_halted(trade_date: str, halted: bool, reason: str) -> None:
+def set_halted(trade_date: str, halted: bool, reason: str, source: str = "AUTO") -> None:
     with get_connection() as conn:
         conn.execute(
-            "UPDATE daily_summary SET halted = ?, halt_reason = ?, updated_at = ? WHERE trade_date = ?",
-            (1 if halted else 0, reason, _now(), trade_date),
+            """
+            UPDATE daily_summary SET halted = ?, halt_reason = ?, halt_source = ?, updated_at = ?
+            WHERE trade_date = ?
+            """,
+            (1 if halted else 0, reason, source, _now(), trade_date),
         )
         conn.commit()
+
+
+def get_halt_state(trade_date: str) -> dict:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT halted, halt_reason, halt_source FROM daily_summary WHERE trade_date = ?",
+            (trade_date,),
+        ).fetchone()
+        if row is None:
+            return {"halted": False, "halt_reason": "", "halt_source": "AUTO"}
+        return dict(row)
 
 
 def record_risk_event(*, order_id: int | None, symbol: str | None, event_type: str,
