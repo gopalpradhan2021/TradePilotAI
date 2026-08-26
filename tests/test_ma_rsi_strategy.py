@@ -1,6 +1,6 @@
 import strategies.ma_rsi_strategy as mod
 from core.models import Side
-from strategies.ma_rsi_strategy import MARsiStrategy, _sma, _rsi
+from strategies.ma_rsi_strategy import MARsiParams, MARsiStrategy, _sma, _rsi
 
 
 # --- pure indicator math -----------------------------------------------
@@ -251,6 +251,47 @@ def test_restore_position_sets_in_position_and_entry_price():
     state = strategy._get_state("RELIANCE")
     assert state.in_position is True
     assert state.entry_price == 150.0
+
+
+# --- MARsiParams override (scripts/nightly_optimize.py's sweep mechanism) ----
+
+def test_default_params_match_module_constants():
+    strategy = MARsiStrategy()
+    assert strategy.params == MARsiParams(
+        short_window=mod.SHORT_WINDOW, long_window=mod.LONG_WINDOW,
+        rsi_window=mod.RSI_WINDOW, rsi_entry_min=mod.RSI_ENTRY_MIN,
+        rsi_entry_max=mod.RSI_ENTRY_MAX, rsi_exit_overbought=mod.RSI_EXIT_OVERBOUGHT,
+        stop_loss_pct=mod.STOP_LOSS_PCT, min_crossover_gap_pct=mod.MIN_CROSSOVER_GAP_PCT,
+        cooldown_seconds=mod.COOLDOWN_SECONDS,
+    )
+
+
+def test_overridden_params_change_warmup_length():
+    """A smaller long_window should let the strategy fully warm up on far fewer prices than
+    the production default (21) requires — proves decide() is actually reading self.params
+    for its indicator windows, not the module constants."""
+    prices = [100.0, 101.0, 99.0, 102.0]
+
+    short_params = MARsiParams(short_window=2, long_window=3, rsi_window=2)
+    short_strategy = MARsiStrategy(params=short_params)
+    for price in prices:
+        short_strategy.decide("RELIANCE", price)
+    short_state = short_strategy._get_state("RELIANCE")
+    assert short_state.prev_short_ma is not None
+    assert short_state.prev_long_ma is not None
+
+    default_strategy = MARsiStrategy()  # long_window=21 by default
+    for price in prices:
+        default_strategy.decide("RELIANCE", price)
+    default_state = default_strategy._get_state("RELIANCE")
+    assert default_state.prev_long_ma is None  # still warming up with only 4 prices
+
+
+def test_overridden_stop_loss_pct_changes_exit_reason_threshold():
+    tight_stop = MARsiParams(stop_loss_pct=0.5)
+    strategy = MARsiStrategy(params=tight_stop)
+    assert strategy.params.stop_loss_pct == 0.5
+    assert strategy.params.stop_loss_pct != MARsiParams().stop_loss_pct
 
 
 def test_restore_position_leaves_ma_history_at_defaults():

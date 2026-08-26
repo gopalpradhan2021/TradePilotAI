@@ -13,6 +13,7 @@ than requiring a historical-data API call.
 import logging
 import time
 from collections import deque
+from dataclasses import dataclass
 from typing import Callable
 
 from core.models import ProposedOrder, Side, OrderType
@@ -38,6 +39,22 @@ MIN_CROSSOVER_GAP_PCT = 0.0005
 # Minimum wall-clock time after closing a position before a new entry is
 # allowed — kills the sub-minute flip-flops seen live (5s, 20s holds).
 COOLDOWN_SECONDS = 60
+
+
+@dataclass(frozen=True)
+class MARsiParams:
+    """Tunable strategy constants, defaulting to the production values above.
+    scripts/nightly_optimize.py sweeps these; live/paper trading (main.py) and
+    scripts/backtest.py both use the defaults unless told otherwise."""
+    short_window: int = SHORT_WINDOW
+    long_window: int = LONG_WINDOW
+    rsi_window: int = RSI_WINDOW
+    rsi_entry_min: float = RSI_ENTRY_MIN
+    rsi_entry_max: float = RSI_ENTRY_MAX
+    rsi_exit_overbought: float = RSI_EXIT_OVERBOUGHT
+    stop_loss_pct: float = STOP_LOSS_PCT
+    min_crossover_gap_pct: float = MIN_CROSSOVER_GAP_PCT
+    cooldown_seconds: float = COOLDOWN_SECONDS
 
 
 def _sma(prices: list[float], window: int) -> float | None:
@@ -75,14 +92,19 @@ class SymbolState:
 
 
 class MARsiStrategy(BaseStrategy):
-    def __init__(self, clock: Callable[[], float] | None = None):
+    def __init__(self, clock: Callable[[], float] | None = None,
+                 params: MARsiParams | None = None):
         """clock defaults to the real monotonic clock (resolved at construction time, not
         at class-definition time, so tests can monkeypatch time.monotonic beforehand);
         scripts/backtest.py injects a simulated one derived from each historical bar's
         timestamp, so COOLDOWN_SECONDS reflects simulated bar-to-bar time rather than the
-        backtest process's real (much faster) execution speed."""
+        backtest process's real (much faster) execution speed.
+
+        params defaults to the production constants (MARsiParams()); scripts/nightly_optimize.py
+        injects candidate parameter sets to backtest without touching the module constants."""
         self._state: dict[str, SymbolState] = {}
         self._clock = clock if clock is not None else time.monotonic
+        self.params = params if params is not None else MARsiParams()
 
     def _get_state(self, symbol: str) -> SymbolState:
         if symbol not in self._state:
@@ -99,18 +121,19 @@ class MARsiStrategy(BaseStrategy):
         if last_traded_price is None:
             return None
 
+        p = self.params
         state = self._get_state(symbol)
         state.prices.append(last_traded_price)
         prices = list(state.prices)
 
-        short_ma = _sma(prices, SHORT_WINDOW)
-        long_ma = _sma(prices, LONG_WINDOW)
-        rsi = _rsi(prices, RSI_WINDOW)
+        short_ma = _sma(prices, p.short_window)
+        long_ma = _sma(prices, p.long_window)
+        rsi = _rsi(prices, p.rsi_window)
 
         if short_ma is None or long_ma is None or rsi is None:
             logger.info(
                 "%s: warming up (%d/%d prices collected)",
-                symbol, len(prices), max(SHORT_WINDOW, LONG_WINDOW, RSI_WINDOW + 1),
+                symbol, len(prices), max(p.short_window, p.long_window, p.rsi_window + 1),
             )
             state.prev_short_ma, state.prev_long_ma = short_ma, long_ma
             return None
@@ -121,13 +144,13 @@ class MARsiStrategy(BaseStrategy):
             state.prev_short_ma is not None and state.prev_long_ma is not None
             and state.prev_short_ma <= state.prev_long_ma
             and short_ma > long_ma
-            and gap_pct >= MIN_CROSSOVER_GAP_PCT
+            and gap_pct >= p.min_crossover_gap_pct
         )
         crossed_down = (
             state.prev_short_ma is not None and state.prev_long_ma is not None
             and state.prev_short_ma >= state.prev_long_ma
             and short_ma < long_ma
-            and gap_pct >= MIN_CROSSOVER_GAP_PCT
+            and gap_pct >= p.min_crossover_gap_pct
         )
 
         order = None
@@ -135,9 +158,9 @@ class MARsiStrategy(BaseStrategy):
         if not state.in_position:
             cooldown_active = (
                 state.last_exit_time is not None
-                and (self._clock() - state.last_exit_time) < COOLDOWN_SECONDS
+                and (self._clock() - state.last_exit_time) < p.cooldown_seconds
             )
-            if crossed_up and not cooldown_active and RSI_ENTRY_MIN <= rsi <= RSI_ENTRY_MAX:
+            if crossed_up and not cooldown_active and p.rsi_entry_min <= rsi <= p.rsi_entry_max:
                 order = ProposedOrder(
                     symbol=symbol,
                     side=Side.BUY,
@@ -154,7 +177,7 @@ class MARsiStrategy(BaseStrategy):
         else:
             stop_hit = (
                 state.entry_price is not None
-                and last_traded_price <= state.entry_price * (1 - STOP_LOSS_PCT / 100)
+                and last_traded_price <= state.entry_price * (1 - p.stop_loss_pct / 100)
             )
             if crossed_down:
                 order = ProposedOrder(
@@ -164,13 +187,13 @@ class MARsiStrategy(BaseStrategy):
                     order_type=OrderType.MARKET,
                     reason=f"MA crossover DOWN (short={short_ma:.2f} < long={long_ma:.2f})",
                 )
-            elif rsi >= RSI_EXIT_OVERBOUGHT:
+            elif rsi >= p.rsi_exit_overbought:
                 order = ProposedOrder(
                     symbol=symbol,
                     side=Side.SELL,
                     qty=DEFAULT_ORDER_QTY,
                     order_type=OrderType.MARKET,
-                    reason=f"RSI overbought ({rsi:.1f} >= {RSI_EXIT_OVERBOUGHT}) — taking profit",
+                    reason=f"RSI overbought ({rsi:.1f} >= {p.rsi_exit_overbought}) — taking profit",
                 )
             elif stop_hit:
                 order = ProposedOrder(
@@ -180,7 +203,7 @@ class MARsiStrategy(BaseStrategy):
                     order_type=OrderType.MARKET,
                     reason=(
                         f"Stop-loss hit: price {last_traded_price:.2f} <= "
-                        f"entry {state.entry_price:.2f} * {1 - STOP_LOSS_PCT/100:.3f}"
+                        f"entry {state.entry_price:.2f} * {1 - p.stop_loss_pct/100:.3f}"
                     ),
                 )
 
