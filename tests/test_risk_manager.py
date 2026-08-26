@@ -170,6 +170,37 @@ def test_day_rollover_resets_counters_and_clears_halt():
     assert rm._realized_pnl_today == 0
 
 
+def test_today_fn_injection_drives_day_rollover():
+    """scripts/backtest.py relies on this: an injected clock, not the real wall
+    clock, must control when daily counters reset."""
+    sim_day = date(2026, 1, 1)
+    rm = RiskManager(make_cfg(), today_fn=lambda: sim_day)
+    rm.manual_halt("day one halt")
+    assert rm.halted is True
+
+    sim_day = date(2026, 1, 2)
+    rm._roll_day_if_needed()
+
+    assert rm.halted is False
+    assert rm._trades_today == 0
+
+
+def test_refresh_halt_state_rolls_day_first():
+    """A halt from a prior (simulated) day must not read as still-halted on a new
+    day just because refresh_halt_state() ran before any order was checked —
+    check() is the only other place that used to roll the day, so a day with
+    zero proposed orders would otherwise never advance."""
+    sim_day = date(2026, 1, 1)
+    rm = RiskManager(make_cfg(), today_fn=lambda: sim_day)
+    rm.manual_halt("day one halt")
+    assert rm.halted is True
+
+    sim_day = date(2026, 1, 2)
+    rm.refresh_halt_state()
+
+    assert rm.halted is False
+
+
 def test_record_fill_increments_trade_count_and_pnl():
     rm = RiskManager(make_cfg(max_daily_loss_inr=10_000))
     rm.record_fill(side=Side.BUY, order_value=100.0, pnl_delta=0.0)

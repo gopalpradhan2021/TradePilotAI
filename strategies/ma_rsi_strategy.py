@@ -13,6 +13,7 @@ than requiring a historical-data API call.
 import logging
 import time
 from collections import deque
+from typing import Callable
 
 from core.models import ProposedOrder, Side, OrderType
 from strategies.base_strategy import BaseStrategy
@@ -74,8 +75,14 @@ class SymbolState:
 
 
 class MARsiStrategy(BaseStrategy):
-    def __init__(self):
+    def __init__(self, clock: Callable[[], float] | None = None):
+        """clock defaults to the real monotonic clock (resolved at construction time, not
+        at class-definition time, so tests can monkeypatch time.monotonic beforehand);
+        scripts/backtest.py injects a simulated one derived from each historical bar's
+        timestamp, so COOLDOWN_SECONDS reflects simulated bar-to-bar time rather than the
+        backtest process's real (much faster) execution speed."""
         self._state: dict[str, SymbolState] = {}
+        self._clock = clock if clock is not None else time.monotonic
 
     def _get_state(self, symbol: str) -> SymbolState:
         if symbol not in self._state:
@@ -128,7 +135,7 @@ class MARsiStrategy(BaseStrategy):
         if not state.in_position:
             cooldown_active = (
                 state.last_exit_time is not None
-                and (time.monotonic() - state.last_exit_time) < COOLDOWN_SECONDS
+                and (self._clock() - state.last_exit_time) < COOLDOWN_SECONDS
             )
             if crossed_up and not cooldown_active and RSI_ENTRY_MIN <= rsi <= RSI_ENTRY_MAX:
                 order = ProposedOrder(
@@ -181,7 +188,7 @@ class MARsiStrategy(BaseStrategy):
                 logger.info("%s: SELL signal — %s", symbol, order.reason)
                 state.in_position = False
                 state.entry_price = None
-                state.last_exit_time = time.monotonic()
+                state.last_exit_time = self._clock()
 
         state.prev_short_ma, state.prev_long_ma = short_ma, long_ma
         return order

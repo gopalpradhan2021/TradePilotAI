@@ -10,6 +10,7 @@ read, so it can't drift from reality across a crash.
 """
 import logging
 from datetime import date
+from typing import Callable
 
 from config.settings import RiskConfig
 from core.db import positions_repo, risk_repo
@@ -20,10 +21,15 @@ logger = logging.getLogger("groww_agent.risk")
 
 
 class RiskManager:
-    def __init__(self, risk_config: RiskConfig, ntfy_topic: str = ""):
+    def __init__(self, risk_config: RiskConfig, ntfy_topic: str = "",
+                 today_fn: Callable[[], date] = date.today):
+        """today_fn defaults to the real wall-clock date; scripts/backtest.py injects a
+        simulated clock instead, so day-rollover (and the daily counters it resets) tracks
+        simulated historical days rather than the backtest process's real run time."""
         self.cfg = risk_config
         self._ntfy_topic = ntfy_topic
-        self._current_day = date.today()
+        self._today_fn = today_fn
+        self._current_day = self._today_fn()
         self._sync_daily_state()
 
     def _notify(self, message: str):
@@ -41,7 +47,7 @@ class RiskManager:
         self.halt_source = summary.get("halt_source", "AUTO")
 
     def _roll_day_if_needed(self):
-        today = date.today()
+        today = self._today_fn()
         if today != self._current_day:
             self._current_day = today
             self._sync_daily_state()
@@ -50,7 +56,10 @@ class RiskManager:
     def refresh_halt_state(self):
         """Re-reads halted/halt_reason/halt_source from the DB unconditionally, so a halt
         or resume triggered by a separate process (scripts/halt_bot.py, scripts/resume_bot.py)
-        takes effect on this process within one call, not just on day rollover."""
+        takes effect on this process within one call, not just on day rollover. Rolls the day
+        first — otherwise a stale halt from a prior day could read as still-halted on a day
+        where check() (the other place that rolls the day) hasn't run yet."""
+        self._roll_day_if_needed()
         db_state = risk_repo.get_halt_state(self._current_day.isoformat())
         self.halted = bool(db_state["halted"])
         self.halt_reason = db_state["halt_reason"]
