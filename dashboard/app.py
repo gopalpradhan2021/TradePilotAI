@@ -6,11 +6,12 @@ import os
 from datetime import date, datetime, timezone
 
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from dotenv import load_dotenv
 
 from config.settings import load_settings
 from core.db import orders_repo, positions_repo, risk_repo
+from core.risk_manager import RiskManager
 from core.status_writer import read_heartbeat
 
 load_dotenv()
@@ -26,6 +27,15 @@ def _check_auth(request: Request):
     supplied = request.query_params.get("key", "")
     if supplied != DASHBOARD_PASSWORD:
         raise HTTPException(status_code=401, detail="Missing or incorrect ?key=")
+
+
+def _risk_manager() -> RiskManager:
+    """Builds a RiskManager the same way scripts/halt_bot.py and scripts/resume_bot.py
+    do — it writes straight to the shared daily_summary row, which the running bot's
+    Orchestrator re-reads every cycle via RiskManager.refresh_halt_state(), so the
+    dashboard needs no direct connection to the bot process."""
+    settings = load_settings()
+    return RiskManager(settings.risk, ntfy_topic=settings.ntfy_topic)
 
 
 def _market_status_ist():
@@ -59,9 +69,20 @@ def _render(status: dict) -> str:
         stale = True
 
     halted = status.get("halted", False)
+    halt_source = status.get("halt_source", "AUTO")
     status_color = "#e74c3c" if halted else ("#f39c12" if stale else "#2ecc71")
     status_text = "HALTED" if halted else ("STALE — bot may be stopped" if stale else "RUNNING")
     pnl_color = "#e74c3c" if status.get("realized_pnl_today", 0) < 0 else "#2ecc71"
+
+    if halted and halt_source == "MANUAL":
+        switch_button = '<button id="switch-btn" class="switch-btn resume" onclick="doResume()">Resume trading</button>'
+    elif halted:
+        switch_button = ('<button class="switch-btn resume" disabled '
+                          'title="Automatic halts (daily loss limit, circuit breaker, '
+                          'reconciliation mismatch) can only clear on the next trading day, '
+                          'not from here.">Resume trading (auto halt)</button>')
+    else:
+        switch_button = '<button id="switch-btn" class="switch-btn halt" onclick="doHalt()">Halt trading</button>'
 
     mkt_state, mkt_label, now_ist = _market_status_ist()
     mkt_color = {"OPEN": "#2ecc71", "PRE-OPEN": "#f39c12",
@@ -128,6 +149,11 @@ def _render(status: dict) -> str:
         .mkt-state {{ font-weight: 700; letter-spacing: 0.5px; }}
         .mkt-label {{ color: #8b949e; }}
         .ist-clock {{ margin-left: auto; color: #58a6ff; font-weight: 600; }}
+        .switch-btn {{ margin-left: 16px; padding: 6px 16px; border-radius: 6px; border: none;
+                        font-weight: 600; cursor: pointer; font-size: 0.85rem; }}
+        .switch-btn.halt {{ background: #e74c3c; color: #fff; }}
+        .switch-btn.resume {{ background: #2ecc71; color: #0d1117; }}
+        .switch-btn:disabled {{ background: #30363d; color: #8b949e; cursor: not-allowed; }}
     </style>
     <script>
         function tickClock() {{
@@ -139,10 +165,47 @@ def _render(status: dict) -> str:
             el.textContent = now + ' IST';
         }}
         setInterval(tickClock, 1000);
+
+        function dashboardKey() {{
+            return new URLSearchParams(window.location.search).get('key') || '';
+        }}
+
+        async function postAction(path, reason) {{
+            const key = dashboardKey();
+            const url = `${{path}}?reason=${{encodeURIComponent(reason)}}` +
+                        (key ? `&key=${{encodeURIComponent(key)}}` : '');
+            const btn = document.getElementById('switch-btn');
+            if (btn) btn.disabled = true;
+            try {{
+                const res = await fetch(url, {{ method: 'POST' }});
+                if (!res.ok) {{
+                    const body = await res.json().catch(() => ({{}}));
+                    alert('Failed: ' + (body.detail || res.statusText));
+                }}
+            }} catch (e) {{
+                alert('Request failed: ' + e);
+            }} finally {{
+                window.location.reload();
+            }}
+        }}
+
+        function doHalt() {{
+            const reason = prompt('Reason for halting the bot?', 'manual kill switch (dashboard)');
+            if (reason === null) return;
+            if (!confirm('Halt live trading now? No new orders will be placed until resumed.')) return;
+            postAction('/api/halt', reason);
+        }}
+
+        function doResume() {{
+            const reason = prompt('Reason for resuming the bot?', 'manual resume (dashboard)');
+            if (reason === null) return;
+            if (!confirm('Resume trading now?')) return;
+            postAction('/api/resume', reason);
+        }}
     </script>
 </head>
 <body>
-    <h1>Groww Trading Agent <span class="badge">{status_text}</span></h1>
+    <h1>Groww Trading Agent <span class="badge">{status_text}</span>{switch_button}</h1>
     <div class="market-bar">
         <span class="mkt-dot" style="background:{mkt_color};"></span>
         <span class="mkt-state">NSE: {mkt_state}</span>
@@ -230,6 +293,7 @@ def _build_status_view() -> dict:
         "mode": heartbeat.get("mode", "UNKNOWN"),
         "halted": bool(daily["halted"]),
         "halt_reason": daily["halt_reason"],
+        "halt_source": daily.get("halt_source", "AUTO"),
         "trades_today": daily["trades_count"],
         "symbols": heartbeat.get("symbols", []),
         "last_ltp": last_ltp,
@@ -257,3 +321,24 @@ def dashboard(request: Request):
 def api_status(request: Request):
     _check_auth(request)
     return _build_status_view()
+
+
+@app.post("/api/halt")
+def api_halt(request: Request, reason: str = "manual kill switch (dashboard)"):
+    _check_auth(request)
+    rm = _risk_manager()
+    rm.manual_halt(reason)
+    return JSONResponse({"halted": True, "halt_source": "MANUAL", "halt_reason": reason})
+
+
+@app.post("/api/resume")
+def api_resume(request: Request, reason: str = "manual resume (dashboard)"):
+    _check_auth(request)
+    rm = _risk_manager()
+    if not rm.halted:
+        return JSONResponse({"halted": False, "message": "Not currently halted."})
+    try:
+        rm.resume(reason)
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return JSONResponse({"halted": False})
