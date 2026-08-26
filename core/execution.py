@@ -6,6 +6,7 @@ Execution layer. Two implementations sharing one interface:
 Supports both CASH (equity) and FNO (futures & options) segments.
 """
 import logging
+import uuid
 from abc import ABC, abstractmethod
 
 from growwapi.groww.exceptions import GrowwAPIAuthenticationException, GrowwAPIAuthorisationException
@@ -14,6 +15,18 @@ from core.auth import get_client, GrowwAuthError
 from core.models import ProposedOrder, ExecutionResult, Segment
 
 logger = logging.getLogger("groww_agent.execution")
+
+
+def _derive_order_reference_id(idempotency_key: str) -> str:
+    """Groww's SDK defaults order_reference_id to a random 8-digit numeric string when none
+    is given (growwapi/groww/client.py: str(random.randint(10000000, 99999999))) — the SDK
+    itself has no client-side format validation, but nothing confirms the backend accepts
+    other formats (e.g. a 36-char UUID) either, and that can only be confirmed against the
+    real API (see scripts/live_order_smoketest.py, deliberately not run yet). Deterministically
+    derives an 8-digit numeric ID from the order's own idempotency_key instead of a random one,
+    so it matches the SDK's own observed convention exactly while still being unique per order
+    and traceable back to the order that generated it."""
+    return str(uuid.UUID(idempotency_key).int % 100_000_000).zfill(8)
 
 
 class BrokerPositionFetchError(Exception):
@@ -165,17 +178,15 @@ class LiveBroker(Broker):
 
     def place_order(self, order: ProposedOrder, last_traded_price: float | None) -> ExecutionResult:
         trading_symbol = _build_trading_symbol(order)
+        order_reference_id = _derive_order_reference_id(order.idempotency_key)
         logger.info(
             "[LIVE] Submitting order: %s %s qty=%s lot=%s total_units=%s segment=%s type=%s "
-            "limit=%s key=%s reason=%s",
+            "limit=%s key=%s ref=%s reason=%s",
             order.side.value, trading_symbol, order.qty, order.lot_size, order.total_units,
             order.segment.value, order.order_type.value, order.limit_price,
-            order.idempotency_key, order.reason,
+            order.idempotency_key, order_reference_id, order.reason,
         )
 
-        # TODO: consider passing order_reference_id=order.idempotency_key once it's
-        # confirmed Groww's API accepts a 36-char UUID (docstring implies an 8-digit
-        # numeric default; unverified whether a longer string is rejected).
         def _call():
             return self.client.place_order(
                 trading_symbol=trading_symbol,
@@ -187,6 +198,7 @@ class LiveBroker(Broker):
                 product=_groww_product(self.client, order.segment),
                 validity=self.client.VALIDITY_DAY,
                 price=order.limit_price,
+                order_reference_id=order_reference_id,
             )
 
         try:
@@ -201,12 +213,17 @@ class LiveBroker(Broker):
             try:
                 response = _call()
             except Exception as e2:
-                logger.error("[LIVE] Order placement FAILED after re-auth retry: %s | order=%s", e2, order)
+                logger.error("[LIVE] Order placement FAILED after re-auth retry: %s | order=%s "
+                             "ref=%s — check get_order_status_by_reference before retrying, a "
+                             "timeout here does not prove the order was never received.",
+                             e2, order, order_reference_id)
                 return ExecutionResult(
                     order=order, status="ERROR", message=f"Auth retry failed: {e2}",
                 )
         except Exception as e:
-            logger.error("[LIVE] Order placement FAILED: %s | order=%s", e, order)
+            logger.error("[LIVE] Order placement FAILED: %s | order=%s ref=%s — check "
+                         "get_order_status_by_reference before retrying, a timeout here does "
+                         "not prove the order was never received.", e, order, order_reference_id)
             return ExecutionResult(order=order, status="ERROR", message=str(e))
 
         broker_order_id = response.get("groww_order_id") or response.get("order_id")
@@ -218,3 +235,35 @@ class LiveBroker(Broker):
             broker_order_id=broker_order_id,
             message=str(response),
         )
+
+    def get_order_status_by_reference(self, order_reference_id: str, segment: Segment = Segment.CASH) -> dict:
+        """Resolves the "did it actually go through" ambiguity from a place_order() timeout —
+        looks the order up by the same order_reference_id place_order() derived and sent, rather
+        than by Groww's own broker_order_id (which a failed/timed-out call never received).
+        Raises on fetch/auth failure, same contract as get_broker_position — a caller must not
+        mistake "couldn't check" for "confirmed not placed"."""
+        def _call():
+            return self.client.get_order_status_by_reference(
+                segment=_groww_segment(self.client, segment),
+                order_reference_id=order_reference_id,
+            )
+
+        try:
+            return _call()
+        except (GrowwAPIAuthenticationException, GrowwAPIAuthorisationException) as e:
+            logger.error("[LIVE] Order status lookup auth error for ref=%s: %s — attempting re-auth.",
+                         order_reference_id, e)
+            if not self._reauth():
+                raise BrokerPositionFetchError(
+                    f"Re-authentication failed looking up order ref={order_reference_id}"
+                ) from e
+            try:
+                return _call()
+            except Exception as e2:
+                raise BrokerPositionFetchError(
+                    f"Order status lookup failed after re-auth retry for ref={order_reference_id}: {e2}"
+                ) from e2
+        except Exception as e:
+            raise BrokerPositionFetchError(
+                f"Order status lookup failed for ref={order_reference_id}: {e}"
+            ) from e

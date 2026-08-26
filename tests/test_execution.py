@@ -2,7 +2,10 @@ from datetime import date
 
 import core.execution as execution_module
 from core.auth import GrowwAuthError
-from core.execution import PaperBroker, LiveBroker, BrokerPositionFetchError, _build_trading_symbol
+from core.execution import (
+    PaperBroker, LiveBroker, BrokerPositionFetchError, _build_trading_symbol,
+    _derive_order_reference_id,
+)
 from core.models import ProposedOrder, Side, OrderType, Segment, OptionType
 from growwapi.groww.exceptions import GrowwAPIAuthenticationException
 
@@ -22,10 +25,12 @@ class FakeGrowwClient:
 
     def __init__(self, response=None, raise_exc=None,
                  quote_response=None, quote_raise_exc=None,
-                 position_response=None, position_raise_exc=None):
+                 position_response=None, position_raise_exc=None,
+                 order_status_response=None, order_status_raise_exc=None):
         self.calls = []
         self.quote_calls = []
         self.position_calls = []
+        self.order_status_calls = []
         self._response = response if response is not None else {
             "groww_order_id": "ORD123", "order_status": "PENDING",
         }
@@ -34,6 +39,8 @@ class FakeGrowwClient:
         self._quote_raise_exc = quote_raise_exc
         self._position_response = position_response if position_response is not None else {"quantity": 0}
         self._position_raise_exc = position_raise_exc
+        self._order_status_response = order_status_response if order_status_response is not None else {}
+        self._order_status_raise_exc = order_status_raise_exc
 
     def place_order(self, **kwargs):
         self.calls.append(kwargs)
@@ -52,6 +59,12 @@ class FakeGrowwClient:
         if self._position_raise_exc is not None:
             raise self._position_raise_exc
         return self._position_response
+
+    def get_order_status_by_reference(self, **kwargs):
+        self.order_status_calls.append(kwargs)
+        if self._order_status_raise_exc is not None:
+            raise self._order_status_raise_exc
+        return self._order_status_response
 
 
 def test_paper_broker_fills_at_ltp_when_no_limit_price():
@@ -242,3 +255,67 @@ def test_get_broker_position_raises_when_reauth_fails(monkeypatch):
     except BrokerPositionFetchError:
         pass
     assert len(failing_client.position_calls) == 1
+
+
+# --- order_reference_id (idempotency / unknown-order recovery) ---------
+
+def test_derive_order_reference_id_is_eight_digits():
+    order = make_order()
+    ref = _derive_order_reference_id(order.idempotency_key)
+    assert len(ref) == 8
+    assert ref.isdigit()
+
+
+def test_derive_order_reference_id_is_deterministic():
+    order = make_order()
+    assert (_derive_order_reference_id(order.idempotency_key)
+            == _derive_order_reference_id(order.idempotency_key))
+
+
+def test_derive_order_reference_id_differs_for_different_keys():
+    a = make_order()
+    b = make_order()
+    assert _derive_order_reference_id(a.idempotency_key) != _derive_order_reference_id(b.idempotency_key)
+
+
+def test_live_broker_place_order_passes_order_reference_id():
+    client = FakeGrowwClient()
+    broker = LiveBroker(client)
+    order = make_order()
+    broker.place_order(order, last_traded_price=150.0)
+
+    expected_ref = _derive_order_reference_id(order.idempotency_key)
+    assert client.calls[0]["order_reference_id"] == expected_ref
+
+
+def test_get_order_status_by_reference_returns_response():
+    client = FakeGrowwClient(order_status_response={"order_status": "COMPLETE"})
+    broker = LiveBroker(client)
+
+    result = broker.get_order_status_by_reference("12345678")
+
+    assert result == {"order_status": "COMPLETE"}
+    assert client.order_status_calls[0]["order_reference_id"] == "12345678"
+
+
+def test_get_order_status_by_reference_raises_on_generic_error():
+    client = FakeGrowwClient(order_status_raise_exc=RuntimeError("network down"))
+    broker = LiveBroker(client)
+
+    try:
+        broker.get_order_status_by_reference("12345678")
+        assert False, "expected BrokerPositionFetchError"
+    except BrokerPositionFetchError:
+        pass
+
+
+def test_get_order_status_by_reference_reauths_on_auth_exception(monkeypatch):
+    failing_client = FakeGrowwClient(order_status_raise_exc=GrowwAPIAuthenticationException())
+    new_client = FakeGrowwClient(order_status_response={"order_status": "REJECTED"})
+    monkeypatch.setattr(execution_module, "get_client", lambda: new_client)
+
+    broker = LiveBroker(failing_client)
+    result = broker.get_order_status_by_reference("12345678")
+
+    assert result == {"order_status": "REJECTED"}
+    assert broker.client is new_client
