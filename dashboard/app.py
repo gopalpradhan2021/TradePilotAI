@@ -4,14 +4,17 @@ Run: uvicorn dashboard.app:app --host 0.0.0.0 --port 8000
 """
 import json
 import os
+import secrets
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import date, datetime, timezone
 
 from fastapi import FastAPI, Form, Request, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from dotenv import load_dotenv
+from starlette.middleware.sessions import SessionMiddleware
 
 from config.settings import load_settings
 from core.db import optimization_repo, orders_repo, positions_repo, risk_repo
@@ -24,14 +27,78 @@ load_dotenv()
 app = FastAPI(title="Groww Agent Dashboard")
 
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
+SESSION_SECRET_KEY = os.getenv("SESSION_SECRET_KEY") or secrets.token_hex(32)
+if not os.getenv("SESSION_SECRET_KEY"):
+    # No TLS in front of this yet, so sessions don't need to be forgery-proof against a
+    # network attacker to be a real improvement — but a secret that changes every process
+    # restart means every operator gets logged out on each deploy. Warn rather than silently
+    # degrade UX; still safe to run without it (a fresh random key per boot), just annoying.
+    import logging
+    logging.getLogger("groww_agent.dashboard").warning(
+        "SESSION_SECRET_KEY not set in .env — using a random key that changes on every "
+        "restart, so operators will be logged out each deploy. Set SESSION_SECRET_KEY to a "
+        "long random string to avoid that."
+    )
+
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=SESSION_SECRET_KEY,
+    max_age=12 * 60 * 60,  # 12h session expiry
+    same_site="lax",
+    https_only=False,  # no TLS in front of this yet — flip to True once there is
+)
+
+# In-memory failed-login throttle: {ip: (fail_count, first_fail_at)}. Resets after
+# _THROTTLE_WINDOW_SEC of no attempts. Deliberately not persisted — a process restart
+# clearing it is an acceptable tradeoff for a single-operator dashboard with no DB migration
+# needed for something this small.
+_failed_logins: dict[str, tuple[int, float]] = {}
+_THROTTLE_MAX_ATTEMPTS = 5
+_THROTTLE_WINDOW_SEC = 300
 
 
-def _check_auth(request: Request):
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _is_throttled(ip: str) -> bool:
+    count, first_fail = _failed_logins.get(ip, (0, 0.0))
+    if time.time() - first_fail > _THROTTLE_WINDOW_SEC:
+        return False
+    return count >= _THROTTLE_MAX_ATTEMPTS
+
+
+def _record_failed_login(ip: str):
+    count, first_fail = _failed_logins.get(ip, (0, 0.0))
+    now = time.time()
+    if now - first_fail > _THROTTLE_WINDOW_SEC:
+        count, first_fail = 0, now
+    _failed_logins[ip] = (count + 1, first_fail)
+
+
+def _clear_failed_logins(ip: str):
+    _failed_logins.pop(ip, None)
+
+
+def _is_authenticated(request: Request) -> bool:
     if not DASHBOARD_PASSWORD:
-        return
-    supplied = request.query_params.get("key", "")
-    if supplied != DASHBOARD_PASSWORD:
-        raise HTTPException(status_code=401, detail="Missing or incorrect ?key=")
+        return True
+    return bool(request.session.get("authenticated"))
+
+
+def _require_page_auth(request: Request) -> RedirectResponse | None:
+    """For HTML page routes — callers do `if (r := _require_page_auth(request)): return r`
+    so an unauthenticated visitor gets redirected to a real login page, not a raw 401."""
+    if not _is_authenticated(request):
+        return RedirectResponse("/login", status_code=303)
+    return None
+
+
+def _require_api_auth(request: Request):
+    """For JSON/API routes called via fetch() — a redirect would just be a confusing JSON
+    parse error client-side, so this 401s instead."""
+    if not _is_authenticated(request):
+        raise HTTPException(status_code=401, detail="Not logged in")
 
 
 def _risk_manager() -> RiskManager:
@@ -41,6 +108,68 @@ def _risk_manager() -> RiskManager:
     dashboard needs no direct connection to the bot process."""
     settings = load_settings()
     return RiskManager(settings.risk, ntfy_topic=settings.ntfy_topic)
+
+
+def _render_login_page(error: str | None = None) -> str:
+    error_html = f'<p style="color:#e74c3c; font-size:0.9rem;">{error}</p>' if error else ""
+    return f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Login — Groww Agent Dashboard</title>
+    <style>
+        body {{ font-family: -apple-system, sans-serif; background: #0d1117; color: #e6edf3;
+                max-width: 360px; margin: 100px auto; padding: 0 20px; }}
+        .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 24px; }}
+        h1 {{ font-size: 1.2rem; margin-top: 0; }}
+        label {{ display: block; margin-top: 10px; color: #8b949e; font-size: 0.85rem; }}
+        input {{ background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 4px;
+                  padding: 8px; margin-top: 4px; width: 100%; box-sizing: border-box; }}
+        button {{ margin-top: 16px; padding: 8px 20px; border-radius: 6px; border: none; width: 100%;
+                   background: #58a6ff; color: #0d1117; font-weight: 600; cursor: pointer; }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>Groww Agent Dashboard</h1>
+        {error_html}
+        <form method="post" action="/login">
+            <label>Password
+                <input type="password" name="password" autofocus>
+            </label>
+            <button type="submit">Log in</button>
+        </form>
+    </div>
+</body>
+</html>
+"""
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page():
+    return _render_login_page()
+
+
+@app.post("/login", response_class=HTMLResponse)
+def login_submit(request: Request, password: str = Form(...)):
+    ip = _client_ip(request)
+    if _is_throttled(ip):
+        return _render_login_page(
+            error=f"Too many failed attempts. Try again in a few minutes."
+        )
+    if not DASHBOARD_PASSWORD or not secrets.compare_digest(password, DASHBOARD_PASSWORD):
+        _record_failed_login(ip)
+        return _render_login_page(error="Incorrect password.")
+    _clear_failed_logins(ip)
+    request.session["authenticated"] = True
+    return RedirectResponse("/", status_code=303)
+
+
+@app.get("/logout")
+def logout(request: Request):
+    request.session.clear()
+    return RedirectResponse("/login", status_code=303)
 
 
 def _run_backtest_subprocess(symbols: list[str], start: str, end: str, interval: str) -> dict:
@@ -69,7 +198,7 @@ def _run_backtest_subprocess(symbols: list[str], start: str, end: str, interval:
             os.remove(out_path)
 
 
-def _render(status: dict, dashboard_key: str = "") -> str:
+def _render(status: dict) -> str:
     updated = status.get("updated_at") or "never"
     if updated != "never":
         try:
@@ -179,14 +308,8 @@ def _render(status: dict, dashboard_key: str = "") -> str:
         }}
         setInterval(tickClock, 1000);
 
-        function dashboardKey() {{
-            return new URLSearchParams(window.location.search).get('key') || '';
-        }}
-
         async function postAction(path, reason) {{
-            const key = dashboardKey();
-            const url = `${{path}}?reason=${{encodeURIComponent(reason)}}` +
-                        (key ? `&key=${{encodeURIComponent(key)}}` : '');
+            const url = `${{path}}?reason=${{encodeURIComponent(reason)}}`;
             const btn = document.getElementById('switch-btn');
             if (btn) btn.disabled = true;
             try {{
@@ -219,7 +342,10 @@ def _render(status: dict, dashboard_key: str = "") -> str:
 </head>
 <body>
     <h1>Groww Trading Agent <span class="badge">{status_text}</span>{switch_button}</h1>
-    <p><a href="/backtest{('?key=' + dashboard_key) if dashboard_key else ''}" style="color:#58a6ff;">Backtest &amp; market replay →</a></p>
+    <p>
+        <a href="/backtest" style="color:#58a6ff;">Backtest &amp; market replay →</a>
+        <a href="/logout" style="color:#8b949e; margin-left:16px; font-size:0.85rem;">Log out</a>
+    </p>
     <div class="market-bar">
         <span class="mkt-dot" style="background:{mkt_color};"></span>
         <span class="mkt-state">NSE: {mkt_state}</span>
@@ -326,20 +452,21 @@ def _build_status_view() -> dict:
 
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request):
-    _check_auth(request)
+    if (r := _require_page_auth(request)):
+        return r
     status = _build_status_view()
-    return _render(status, dashboard_key=request.query_params.get("key", ""))
+    return _render(status)
 
 
 @app.get("/api/status")
 def api_status(request: Request):
-    _check_auth(request)
+    _require_api_auth(request)
     return _build_status_view()
 
 
 @app.post("/api/halt")
 def api_halt(request: Request, reason: str = "manual kill switch (dashboard)"):
-    _check_auth(request)
+    _require_api_auth(request)
     rm = _risk_manager()
     rm.manual_halt(reason)
     return JSONResponse({"halted": True, "halt_source": "MANUAL", "halt_reason": reason})
@@ -347,7 +474,7 @@ def api_halt(request: Request, reason: str = "manual kill switch (dashboard)"):
 
 @app.post("/api/resume")
 def api_resume(request: Request, reason: str = "manual resume (dashboard)"):
-    _check_auth(request)
+    _require_api_auth(request)
     rm = _risk_manager()
     if not rm.halted:
         return JSONResponse({"halted": False, "message": "Not currently halted."})
@@ -358,12 +485,8 @@ def api_resume(request: Request, reason: str = "manual resume (dashboard)"):
     return JSONResponse({"halted": False})
 
 
-def _render_backtest_page(dashboard_key: str, form: dict, result: dict | None,
-                           error: str | None) -> str:
+def _render_backtest_page(form: dict, result: dict | None, error: str | None) -> str:
     from core.db import optimization_repo
-
-    key_qs = f"?key={dashboard_key}" if dashboard_key else ""
-    key_hidden = f'<input type="hidden" name="key" value="{dashboard_key}">' if dashboard_key else ""
 
     if error:
         result_html = f'<div class="card" style="border-color:#e74c3c;"><h3 style="margin-top:0;color:#e74c3c;">Backtest failed</h3><pre style="white-space:pre-wrap;font-size:0.85rem;color:#e6edf3;">{error}</pre></div>'
@@ -426,7 +549,7 @@ def _render_backtest_page(dashboard_key: str, form: dict, result: dict | None,
 </head>
 <body>
     <h1>Backtest &amp; Market Replay</h1>
-    <p><a href="/{key_qs}" style="color:#58a6ff;">← Back to dashboard</a></p>
+    <p><a href="/" style="color:#58a6ff;">← Back to dashboard</a></p>
     <p style="color:#8b949e; font-size:0.85rem;">
         Runs the real strategy against historical Groww candle data via a paper broker — never
         places a real order. Groww caps query windows: 30 days max for intraday intervals
@@ -435,7 +558,6 @@ def _render_backtest_page(dashboard_key: str, form: dict, result: dict | None,
 
     <div class="card">
         <form method="post" action="/backtest">
-            {key_hidden}
             <label>Symbols (comma-separated)
                 <input type="text" name="symbols" value="{form.get('symbols', 'RELIANCE')}">
             </label>
@@ -475,16 +597,16 @@ def _render_backtest_page(dashboard_key: str, form: dict, result: dict | None,
 
 @app.get("/backtest", response_class=HTMLResponse)
 def backtest_page(request: Request):
-    _check_auth(request)
-    key = request.query_params.get("key", "")
-    return _render_backtest_page(key, form={"interval": "5minute"}, result=None, error=None)
+    if (r := _require_page_auth(request)):
+        return r
+    return _render_backtest_page(form={"interval": "5minute"}, result=None, error=None)
 
 
 @app.post("/backtest", response_class=HTMLResponse)
 def backtest_run(request: Request, symbols: str = Form("RELIANCE"), start: str = Form(""),
-                  end: str = Form(""), interval: str = Form("5minute"), key: str = Form("")):
-    if DASHBOARD_PASSWORD and key != DASHBOARD_PASSWORD:
-        raise HTTPException(status_code=401, detail="Missing or incorrect key")
+                  end: str = Form(""), interval: str = Form("5minute")):
+    if (r := _require_page_auth(request)):
+        return r
 
     form = {"symbols": symbols, "start": start, "end": end, "interval": interval}
     symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
@@ -497,4 +619,4 @@ def backtest_run(request: Request, symbols: str = Form("RELIANCE"), start: str =
         except Exception as e:
             error = str(e)
 
-    return _render_backtest_page(key, form=form, result=result, error=error)
+    return _render_backtest_page(form=form, result=result, error=error)
