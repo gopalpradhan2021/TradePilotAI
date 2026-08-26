@@ -37,8 +37,7 @@ import os
 import shutil
 import sys
 import tempfile
-from dataclasses import replace
-from datetime import date, datetime
+from datetime import datetime
 
 
 def _parse_args():
@@ -58,18 +57,24 @@ def _normalize_dt(value: str) -> str:
     return value if " " in value else f"{value} 00:00:00"
 
 
-class SimClock:
-    """Drives RiskManager's day-rollover and MARsiStrategy's cooldown off simulated
-    historical time instead of the backtest process's real (much faster) run time."""
-
-    def __init__(self, start: datetime):
-        self.current = start
-
-    def today(self) -> date:
-        return self.current.date()
-
-    def monotonic(self) -> float:
-        return self.current.timestamp()
+def fetch_candles(client, symbol: str, start_time: str, end_time: str, interval: str) -> list[dict]:
+    """Shared by this CLI and scripts/nightly_optimize.py."""
+    response = client.get_historical_candles(
+        exchange=client.EXCHANGE_NSE,
+        segment=client.SEGMENT_CASH,
+        groww_symbol=f"NSE-{symbol}",
+        start_time=start_time,
+        end_time=end_time,
+        candle_interval=interval,
+    )
+    candles = [
+        {"timestamp": datetime.fromisoformat(row[0]), "open": row[1], "high": row[2],
+         "low": row[3], "close": row[4], "volume": row[5]}
+        for row in response.get("candles", [])
+        if row[4] is not None
+    ]
+    candles.sort(key=lambda c: c["timestamp"])
+    return candles
 
 
 def main():
@@ -78,20 +83,17 @@ def main():
     args = _parse_args()
 
     scratch_dir = tempfile.mkdtemp(prefix="tradepilot_backtest_")
-    os.environ["DATABASE_PATH"] = os.path.join(scratch_dir, "trading.db")
-    os.environ["HEARTBEAT_PATH"] = os.path.join(scratch_dir, "heartbeat.json")
+
+    from core.backtest_engine import point_db_at_scratch
+    point_db_at_scratch(os.path.join(scratch_dir, "trading.db"),
+                         os.path.join(scratch_dir, "heartbeat.json"))
 
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s | %(name)s | %(message)s")
 
     from config.settings import load_settings
     from core.auth import get_client, GrowwAuthError
-    from core.db import positions_repo, risk_repo
+    from core.backtest_engine import backtest_settings, run_backtest
     from core.db.migrate import run_migrations
-    from core.execution import PaperBroker
-    from core.orchestrator import Orchestrator
-    from core.replay_market_data import ReplayMarketDataClient
-    from core.risk_manager import RiskManager
-    from strategies.ma_rsi_strategy import MARsiStrategy
 
     run_migrations()
 
@@ -106,20 +108,7 @@ def main():
 
     candles_by_symbol = {}
     for symbol in args.symbols:
-        response = client.get_historical_candles(
-            exchange=client.EXCHANGE_NSE,
-            segment=client.SEGMENT_CASH,
-            groww_symbol=f"NSE-{symbol}",
-            start_time=start_time,
-            end_time=end_time,
-            candle_interval=args.interval,
-        )
-        candles = [
-            {"timestamp": datetime.fromisoformat(row[0]), "open": row[1], "high": row[2],
-             "low": row[3], "close": row[4], "volume": row[5]}
-            for row in response.get("candles", [])
-        ]
-        candles.sort(key=lambda c: c["timestamp"])
+        candles = fetch_candles(client, symbol, start_time, end_time, args.interval)
         if not candles:
             print(f"No historical candles returned for {symbol} in that range — aborting.")
             shutil.rmtree(scratch_dir, ignore_errors=True)
@@ -128,56 +117,9 @@ def main():
         print(f"{symbol}: {len(candles)} candles, "
               f"{candles[0]['timestamp']} -> {candles[-1]['timestamp']}")
 
-    replay_client = ReplayMarketDataClient(candles_by_symbol)
-    driving_symbol = args.symbols[0]
-    sim_clock = SimClock(candles_by_symbol[driving_symbol][0]["timestamp"])
-
-    settings = replace(load_settings(), mode="BACKTEST")
-
-    broker = PaperBroker(market_data_client=replay_client)
-    risk_manager = RiskManager(settings.risk, ntfy_topic="", today_fn=sim_clock.today)
-    strategy = MARsiStrategy(clock=sim_clock.monotonic)
-    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
-
-    bars = 0
-    while any(replay_client.has_more(s) for s in args.symbols):
-        next_ts = replay_client.peek_next_timestamp(driving_symbol)
-        if next_ts is not None:
-            sim_clock.current = next_ts
-        orchestrator.run_once(args.symbols)
-        bars += 1
-
-    closed = positions_repo.get_closed_positions()
-    win_count, loss_count = positions_repo.get_win_loss_counts()
-    total_trades = win_count + loss_count
-    net_pnl = sum(p["realized_pnl"] for p in closed)
-    wins = [p["realized_pnl"] for p in closed if p["realized_pnl"] > 0]
-    losses = [p["realized_pnl"] for p in closed if p["realized_pnl"] < 0]
-
-    equity = 0.0
-    peak = 0.0
-    max_drawdown = 0.0
-    for p in closed:
-        equity += p["realized_pnl"]
-        peak = max(peak, equity)
-        max_drawdown = min(max_drawdown, equity - peak)
-
-    report = {
-        "symbols": args.symbols,
-        "start": start_time,
-        "end": end_time,
-        "interval": args.interval,
-        "bars_processed": bars,
-        "total_trades": total_trades,
-        "wins": win_count,
-        "losses": loss_count,
-        "win_rate_pct": round(100 * win_count / total_trades, 1) if total_trades else None,
-        "net_pnl": round(net_pnl, 2),
-        "avg_win": round(sum(wins) / len(wins), 2) if wins else None,
-        "avg_loss": round(sum(losses) / len(losses), 2) if losses else None,
-        "max_drawdown": round(max_drawdown, 2),
-        "risk_halt_events": risk_repo.count_events("HALTED"),
-    }
+    settings = backtest_settings(load_settings())
+    report = run_backtest(candles_by_symbol, args.symbols, settings)
+    report = {"start": start_time, "end": end_time, "interval": args.interval, **report}
 
     print("\n=== Backtest report ===")
     for k, v in report.items():
