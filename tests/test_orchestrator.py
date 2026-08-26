@@ -1,14 +1,16 @@
+import time
+
 import core.orchestrator as orchestrator_module
 from config.settings import RiskConfig, Settings
 from core.db import orders_repo, positions_repo
-from core.execution import PaperBroker
+from core.execution import BrokerPositionFetchError, PaperBroker
 from core.models import ProposedOrder, ExecutionResult, Side, OrderType
 from core.orchestrator import Orchestrator
 from core.risk_manager import RiskManager
 from strategies.base_strategy import BaseStrategy
 
 
-def make_settings(**risk_overrides):
+def make_settings(mode="PAPER", **risk_overrides):
     defaults = dict(
         max_order_value_inr=100_000,
         max_daily_loss_inr=2_000,
@@ -19,7 +21,7 @@ def make_settings(**risk_overrides):
         allow_fno=False,
     )
     defaults.update(risk_overrides)
-    return Settings(mode="PAPER", risk=RiskConfig(**defaults), ntfy_topic="")
+    return Settings(mode=mode, risk=RiskConfig(**defaults), ntfy_topic="")
 
 
 class ScriptedStrategy(BaseStrategy):
@@ -52,6 +54,25 @@ class NonFillingBroker(FixedPriceBroker):
 
     def place_order(self, order, last_traded_price):
         return ExecutionResult(order=order, status=self._status, message=self._message)
+
+
+class ReconcilingBroker(FixedPriceBroker):
+    """A LiveBroker-like stub exposing get_broker_position — PaperBroker deliberately has no
+    such method, so tests can also rely on an AttributeError here to prove PAPER mode never
+    even attempts a periodic reconciliation call."""
+
+    def __init__(self, price: float, broker_qty_by_symbol: dict[str, int] | None = None,
+                 raise_for: set[str] | None = None):
+        super().__init__(price)
+        self._broker_qty = broker_qty_by_symbol or {}
+        self._raise_for = raise_for or set()
+        self.position_calls = []
+
+    def get_broker_position(self, symbol):
+        self.position_calls.append(symbol)
+        if symbol in self._raise_for:
+            raise BrokerPositionFetchError(f"fetch failed for {symbol}")
+        return {"symbol": symbol, "qty": self._broker_qty.get(symbol, 0)}
 
 
 class FailingStrategy(BaseStrategy):
@@ -318,3 +339,89 @@ def test_circuit_breaker_resets_after_intervening_success(monkeypatch):
 
     assert risk_manager.halted is False
     assert failing._consecutive_failures == 2
+
+
+# --- periodic reconciliation ---------------------------------------------
+
+def test_periodic_reconciliation_does_not_fire_immediately_after_construction():
+    settings = make_settings(mode="LIVE")
+    risk_manager = RiskManager(settings.risk)
+    broker = ReconcilingBroker(price=100.0, broker_qty_by_symbol={"RELIANCE": 5})  # mismatch
+    strategy = ScriptedStrategy({"RELIANCE": [None]})
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+
+    orchestrator.run_once(symbols=["RELIANCE"])
+
+    assert broker.position_calls == []
+    assert risk_manager.halted is False
+
+
+def test_periodic_reconciliation_fires_after_interval_elapses_and_halts_on_mismatch():
+    settings = make_settings(mode="LIVE")
+    risk_manager = RiskManager(settings.risk)
+    broker = ReconcilingBroker(price=100.0, broker_qty_by_symbol={"RELIANCE": 5})  # local=0
+    strategy = ScriptedStrategy({"RELIANCE": [None]})
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+    orchestrator._last_reconcile_time = time.monotonic() - 9999
+
+    orchestrator.run_once(symbols=["RELIANCE"])
+
+    assert broker.position_calls == ["RELIANCE"]
+    assert risk_manager.halted is True
+    assert risk_manager.halt_source == "AUTO"
+
+
+def test_periodic_reconciliation_matching_position_does_not_halt():
+    settings = make_settings(mode="LIVE")
+    risk_manager = RiskManager(settings.risk)
+    broker = ReconcilingBroker(price=100.0, broker_qty_by_symbol={"RELIANCE": 0})  # matches local=0
+    strategy = ScriptedStrategy({"RELIANCE": [None]})
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+    orchestrator._last_reconcile_time = time.monotonic() - 9999
+
+    orchestrator.run_once(symbols=["RELIANCE"])
+
+    assert broker.position_calls == ["RELIANCE"]
+    assert risk_manager.halted is False
+
+
+def test_periodic_reconciliation_skipped_entirely_in_paper_mode():
+    settings = make_settings(mode="PAPER")
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=100.0)  # no get_broker_position at all
+    strategy = ScriptedStrategy({"RELIANCE": [None]})
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+    orchestrator._last_reconcile_time = time.monotonic() - 9999
+
+    orchestrator.run_once(symbols=["RELIANCE"])  # must not raise AttributeError
+
+    assert risk_manager.halted is False
+
+
+def test_periodic_reconciliation_halt_skips_rest_of_cycle():
+    settings = make_settings(mode="LIVE")
+    risk_manager = RiskManager(settings.risk)
+    broker = ReconcilingBroker(price=100.0, broker_qty_by_symbol={"RELIANCE": 5})
+    strategy = ScriptedStrategy({"RELIANCE": [make_buy_order()]})
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+    orchestrator._last_reconcile_time = time.monotonic() - 9999
+
+    orchestrator.run_once(symbols=["RELIANCE"])
+
+    # Reconciliation halted mid-cycle — the strategy's queued order must never have been
+    # proposed/placed on top of a known-bad local picture.
+    assert orders_repo.get_recent_orders(10) == []
+
+
+def test_periodic_reconciliation_does_not_refire_within_the_same_interval():
+    settings = make_settings(mode="LIVE")
+    risk_manager = RiskManager(settings.risk)
+    broker = ReconcilingBroker(price=100.0, broker_qty_by_symbol={"RELIANCE": 0})
+    strategy = ScriptedStrategy({"RELIANCE": [None, None]})
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+    orchestrator._last_reconcile_time = time.monotonic() - 9999
+
+    orchestrator.run_once(symbols=["RELIANCE"])
+    orchestrator.run_once(symbols=["RELIANCE"])
+
+    assert broker.position_calls == ["RELIANCE"]  # only the first call reconciled

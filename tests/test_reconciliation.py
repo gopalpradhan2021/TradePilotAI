@@ -4,8 +4,8 @@ from config.settings import RiskConfig
 from core.db import orders_repo, positions_repo
 from core.execution import BrokerPositionFetchError
 from core.models import ProposedOrder, Side, OrderType
+from core.reconciliation import reconcile_positions
 from core.risk_manager import RiskManager
-from main import reconcile_positions
 
 test_logger = logging.getLogger("test")
 

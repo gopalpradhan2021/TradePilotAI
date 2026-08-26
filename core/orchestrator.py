@@ -12,6 +12,7 @@ from config.settings import Settings
 from core.db import orders_repo, positions_repo, risk_repo
 from core.models import ProposedOrder, Side
 from core.notifier import send_notification
+from core.reconciliation import reconcile_positions
 from core.status_writer import write_heartbeat
 
 logger = logging.getLogger("groww_agent.orchestrator")
@@ -20,6 +21,13 @@ logger = logging.getLogger("groww_agent.orchestrator")
 class Orchestrator:
     _CIRCUIT_BREAKER_THRESHOLD = 5  # ~25s of continuous failure at the default 5s poll interval
 
+    # Roadmap guidance: "every 30-60 seconds during live trading, subject to broker/API
+    # limits." LIVE mode only — PaperBroker has no real broker position to reconcile against,
+    # and this class constant makes that mode gate the only thing standing between a backtest
+    # replay (which calls run_once() in a tight loop) and hammering a real API hundreds of
+    # times, so it's deliberately not interval-skippable in any other way.
+    _RECONCILE_INTERVAL_SEC = 60
+
     def __init__(self, settings: Settings, broker, risk_manager, strategy):
         self.settings = settings
         self.broker = broker
@@ -27,6 +35,10 @@ class Orchestrator:
         self.strategy = strategy
         self._last_ltp: dict[str, float | None] = {}
         self._consecutive_failures = 0
+        # Starts the clock at construction rather than None/0, so the first periodic check
+        # doesn't fire immediately after startup — main.py already does a startup-time
+        # reconciliation before the orchestrator loop even begins.
+        self._last_reconcile_time = time.monotonic()
 
     def _notify(self, message: str):
         try:
@@ -34,10 +46,31 @@ class Orchestrator:
         except Exception as e:
             logger.error("Failed to send notification: %s", e)
 
+    def _maybe_reconcile(self, symbols: list[str]):
+        """LIVE mode only, at most once per _RECONCILE_INTERVAL_SEC — same check
+        main.py runs once at startup, repeated periodically so drift mid-session (a fill
+        the bot didn't hear about, a manual trade placed directly on Groww's app, etc.)
+        gets caught before more orders are proposed on top of a wrong local picture,
+        instead of only ever being caught on the next restart."""
+        if self.settings.mode != "LIVE":
+            return
+        now = time.monotonic()
+        if now - self._last_reconcile_time < self._RECONCILE_INTERVAL_SEC:
+            return
+        self._last_reconcile_time = now
+        reconcile_positions(self.broker, self.risk_manager, symbols, logger)
+
     def run_once(self, symbols: list[str]):
         self.risk_manager.refresh_halt_state()
         if self.risk_manager.halted:
             logger.warning("Skipping cycle — risk manager is halted: %s",
+                            self.risk_manager.halt_reason)
+            self._write_heartbeat(symbols)
+            return
+
+        self._maybe_reconcile(symbols)
+        if self.risk_manager.halted:
+            logger.warning("Skipping cycle — reconciliation just halted trading: %s",
                             self.risk_manager.halt_reason)
             self._write_heartbeat(symbols)
             return
