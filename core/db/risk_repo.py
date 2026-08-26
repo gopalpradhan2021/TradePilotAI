@@ -68,6 +68,14 @@ def get_halt_state(trade_date: str) -> dict:
         return dict(row)
 
 
+def count_events(event_type: str) -> int:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM risk_events WHERE event_type = ?", (event_type,)
+        ).fetchone()
+        return row["n"]
+
+
 def record_risk_event(*, order_id: int | None, symbol: str | None, event_type: str,
                        reasons: list[str], reference_price: float | None = None,
                        order_value: float | None = None, deployed_capital: float | None = None,

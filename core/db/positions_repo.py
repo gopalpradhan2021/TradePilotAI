@@ -66,6 +66,17 @@ def get_open_positions() -> list[dict]:
         return [dict(r) for r in rows]
 
 
+def get_closed_positions() -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT symbol, qty, entry_price, exit_price, realized_pnl, opened_at, closed_at
+            FROM positions WHERE status = 'CLOSED' ORDER BY closed_at ASC
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 def get_win_loss_counts() -> tuple[int, int]:
     with get_connection() as conn:
         row = conn.execute(
