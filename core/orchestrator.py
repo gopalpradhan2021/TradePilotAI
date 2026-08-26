@@ -10,6 +10,7 @@ import time
 
 from config.settings import Settings
 from core.db import orders_repo, positions_repo, risk_repo
+from core.market_hours import is_market_open
 from core.models import ProposedOrder, Side
 from core.notifier import send_notification
 from core.reconciliation import reconcile_positions
@@ -28,6 +29,12 @@ class Orchestrator:
     # times, so it's deliberately not interval-skippable in any other way.
     _RECONCILE_INTERVAL_SEC = 60
 
+    # How long a symbol's LTP can go unchanged during market hours before it's treated as
+    # stale rather than genuinely flat. 2 minutes at the default 5s poll interval is ~24
+    # consecutive identical reads — well past normal tick noise for a liquid large-cap, short
+    # enough that a real feed outage doesn't go unnoticed for long.
+    _STALE_DATA_THRESHOLD_SEC = 120
+
     def __init__(self, settings: Settings, broker, risk_manager, strategy):
         self.settings = settings
         self.broker = broker
@@ -39,6 +46,13 @@ class Orchestrator:
         # doesn't fire immediately after startup — main.py already does a startup-time
         # reconciliation before the orchestrator loop even begins.
         self._last_reconcile_time = time.monotonic()
+        # {symbol: (last_seen_price, monotonic_time_that_price_was_first_seen)} — tracks how
+        # long each symbol's LTP has gone UNCHANGED, not just how long since the last fetch,
+        # since a degraded feed returning the same cached value on every successful call is a
+        # real, silent failure mode (fetch errors already return None and are handled
+        # separately by strategy.decide()).
+        self._price_freshness: dict[str, tuple[float, float]] = {}
+        self._stale_notified: set[str] = set()
 
     def _notify(self, message: str):
         try:
@@ -60,6 +74,40 @@ class Orchestrator:
         self._last_reconcile_time = now
         reconcile_positions(self.broker, self.risk_manager, symbols, logger)
 
+    def _is_stale(self, symbol: str, ltp: float | None) -> bool:
+        """Updates freshness tracking for `symbol` and returns whether its price should be
+        treated as too stale to trade on right now. Only checked during market hours — a
+        frozen price outside market hours is expected, not a fault."""
+        if ltp is None:
+            return False  # already handled as a no-decision case by strategy.decide()
+
+        now = time.monotonic()
+        prev = self._price_freshness.get(symbol)
+        if prev is None or prev[0] != ltp:
+            self._price_freshness[symbol] = (ltp, now)
+            self._stale_notified.discard(symbol)
+            return False
+
+        _, first_seen_at = prev
+        if now - first_seen_at < self._STALE_DATA_THRESHOLD_SEC:
+            return False
+        if not is_market_open():
+            return False
+
+        if symbol not in self._stale_notified:
+            self._stale_notified.add(symbol)
+            logger.warning(
+                "%s: price unchanged for over %ds during market hours (stuck at %s) — "
+                "treating as stale, skipping trading decisions until it moves again.",
+                symbol, self._STALE_DATA_THRESHOLD_SEC, ltp,
+            )
+            self._notify(
+                f"⚠️ {symbol}: price feed looks stale (unchanged for over "
+                f"{self._STALE_DATA_THRESHOLD_SEC}s during market hours) — skipping trades "
+                f"on this symbol until fresh data resumes."
+            )
+        return True
+
     def run_once(self, symbols: list[str]):
         self.risk_manager.refresh_halt_state()
         if self.risk_manager.halted:
@@ -78,6 +126,8 @@ class Orchestrator:
         for symbol in symbols:
             ltp = self.broker.get_ltp(symbol)
             self._last_ltp[symbol] = ltp
+            if self._is_stale(symbol, ltp):
+                continue
             proposed = self.strategy.decide(symbol=symbol, last_traded_price=ltp)
             if proposed is None:
                 continue

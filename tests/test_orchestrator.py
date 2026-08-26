@@ -425,3 +425,124 @@ def test_periodic_reconciliation_does_not_refire_within_the_same_interval():
     orchestrator.run_once(symbols=["RELIANCE"])
 
     assert broker.position_calls == ["RELIANCE"]  # only the first call reconciled
+
+
+# --- stale market-data protection ----------------------------------------
+
+def test_fresh_price_not_flagged_stale(monkeypatch):
+    monkeypatch.setattr(orchestrator_module, "is_market_open", lambda: True)
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=100.0)
+
+    calls = []
+
+    class RecordingStrategy(BaseStrategy):
+        def decide(self, symbol, last_traded_price):
+            calls.append(last_traded_price)
+            return None
+
+    orchestrator = Orchestrator(settings, broker, risk_manager, RecordingStrategy())
+
+    orchestrator.run_once(symbols=["RELIANCE"])
+
+    assert calls == [100.0]  # strategy was consulted — not treated as stale
+
+
+def test_unchanged_price_not_flagged_before_threshold(monkeypatch):
+    monkeypatch.setattr(orchestrator_module, "is_market_open", lambda: True)
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=100.0)
+    strategy = ScriptedStrategy({"RELIANCE": [None]})
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+    # Same price "first seen" only 10s ago — well under the 120s threshold.
+    orchestrator._price_freshness["RELIANCE"] = (100.0, time.monotonic() - 10)
+
+    assert orchestrator._is_stale("RELIANCE", 100.0) is False
+
+
+def test_unchanged_price_flagged_stale_past_threshold_during_market_hours(monkeypatch):
+    monkeypatch.setattr(orchestrator_module, "is_market_open", lambda: True)
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=100.0)
+    orchestrator = Orchestrator(settings, broker, risk_manager, ScriptedStrategy({}))
+    orchestrator._price_freshness["RELIANCE"] = (100.0, time.monotonic() - 9999)
+
+    assert orchestrator._is_stale("RELIANCE", 100.0) is True
+
+
+def test_unchanged_price_not_flagged_outside_market_hours(monkeypatch):
+    monkeypatch.setattr(orchestrator_module, "is_market_open", lambda: False)
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=100.0)
+    orchestrator = Orchestrator(settings, broker, risk_manager, ScriptedStrategy({}))
+    orchestrator._price_freshness["RELIANCE"] = (100.0, time.monotonic() - 9999)
+
+    assert orchestrator._is_stale("RELIANCE", 100.0) is False
+
+
+def test_price_change_resets_staleness_clock(monkeypatch):
+    monkeypatch.setattr(orchestrator_module, "is_market_open", lambda: True)
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=100.0)
+    orchestrator = Orchestrator(settings, broker, risk_manager, ScriptedStrategy({}))
+    orchestrator._price_freshness["RELIANCE"] = (100.0, time.monotonic() - 9999)
+
+    result = orchestrator._is_stale("RELIANCE", 101.0)  # price actually moved
+
+    assert result is False
+    assert orchestrator._price_freshness["RELIANCE"][0] == 101.0
+
+
+def test_none_ltp_never_flagged_stale(monkeypatch):
+    monkeypatch.setattr(orchestrator_module, "is_market_open", lambda: True)
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=100.0)
+    orchestrator = Orchestrator(settings, broker, risk_manager, ScriptedStrategy({}))
+
+    assert orchestrator._is_stale("RELIANCE", None) is False
+
+
+def test_stale_price_skips_strategy_call(monkeypatch):
+    monkeypatch.setattr(orchestrator_module, "is_market_open", lambda: True)
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=100.0)
+
+    calls = []
+
+    class RecordingStrategy(BaseStrategy):
+        def decide(self, symbol, last_traded_price):
+            calls.append(symbol)
+            return None
+
+    orchestrator = Orchestrator(settings, broker, risk_manager, RecordingStrategy())
+    orchestrator._price_freshness["RELIANCE"] = (100.0, time.monotonic() - 9999)
+
+    orchestrator.run_once(symbols=["RELIANCE"])
+
+    assert calls == []  # strategy never consulted on a stale price
+
+
+def test_stale_notification_fires_once_not_every_cycle(monkeypatch):
+    monkeypatch.setattr(orchestrator_module, "is_market_open", lambda: True)
+    calls = []
+    monkeypatch.setattr(orchestrator_module, "send_notification", lambda settings, msg: calls.append(msg) or True)
+
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=100.0)
+    orchestrator = Orchestrator(settings, broker, risk_manager, ScriptedStrategy({}))
+    orchestrator._price_freshness["RELIANCE"] = (100.0, time.monotonic() - 9999)
+
+    orchestrator.run_once(symbols=["RELIANCE"])
+    orchestrator.run_once(symbols=["RELIANCE"])
+    orchestrator.run_once(symbols=["RELIANCE"])
+
+    assert len(calls) == 1
+    assert "stale" in calls[0].lower()
