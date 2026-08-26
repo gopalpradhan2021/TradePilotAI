@@ -1,0 +1,12 @@
+[Unit]
+Description=Back up the TradePilotAI trading database (local, rotated)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=trader
+Group=trader
+WorkingDirectory=/home/trader/groww-agent
+ExecStart=/home/trader/groww-agent/venv/bin/python -m scripts.backup_db
+StandardOutput=append:/home/trader/groww-agent/logs/backup.log
+StandardError=append:/home/trader/groww-agent/logs/backup.log

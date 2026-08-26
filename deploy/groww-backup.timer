@@ -1,0 +1,9 @@
+[Unit]
+Description=Fire groww-backup daily at 12:30 AM IST
+
+[Timer]
+OnCalendar=*-*-* 19:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
