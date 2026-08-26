@@ -87,6 +87,17 @@ def main():
         )
         sys.exit(1)
 
+    if want_live and os.getenv("BACKTEST_VALIDATED", "false").strip().lower() != "true":
+        logger.error(
+            "Refusing to start live: BACKTEST_VALIDATED is not 'true' in .env. Run "
+            "scripts/backtest.py (backtest/market-replay against historical data) and "
+            "validate the strategy against real paper-trading results first, then set "
+            "BACKTEST_VALIDATED=true in .env once you're satisfied — this is a third, "
+            "independent guard alongside --live and MODE=LIVE so real money can't be put "
+            "at risk before that validation has actually happened."
+        )
+        sys.exit(1)
+
     risk_manager = RiskManager(settings.risk, ntfy_topic=settings.ntfy_topic)
 
     if want_live:
