@@ -2,15 +2,20 @@
 Lightweight status dashboard for the trading bot.
 Run: uvicorn dashboard.app:app --host 0.0.0.0 --port 8000
 """
+import json
 import os
+import subprocess
+import sys
+import tempfile
 from datetime import date, datetime, timezone
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Form, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from dotenv import load_dotenv
 
 from config.settings import load_settings
-from core.db import orders_repo, positions_repo, risk_repo
+from core.db import optimization_repo, orders_repo, positions_repo, risk_repo
+from core.market_hours import market_status_ist
 from core.risk_manager import RiskManager
 from core.status_writer import read_heartbeat
 
@@ -38,25 +43,33 @@ def _risk_manager() -> RiskManager:
     return RiskManager(settings.risk, ntfy_topic=settings.ntfy_topic)
 
 
-def _market_status_ist():
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-    now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
-    weekday = now_ist.weekday()
-    t = now_ist.time()
-    from datetime import time as dtime
-    if weekday >= 5:
-        return "CLOSED", "Weekend", now_ist
-    if dtime(9, 0) <= t < dtime(9, 15):
-        return "PRE-OPEN", "Pre-open session", now_ist
-    if dtime(9, 15) <= t < dtime(15, 30):
-        return "OPEN", "Regular trading session", now_ist
-    if dtime(15, 30) <= t < dtime(16, 0):
-        return "CLOSING", "Closing/post-close session", now_ist
-    return "CLOSED", "Outside trading hours", now_ist
+def _run_backtest_subprocess(symbols: list[str], start: str, end: str, interval: str) -> dict:
+    """Runs scripts/backtest.py as a SEPARATE process rather than importing and calling its
+    logic in-process. This is deliberate: run_backtest() (core/backtest_engine.py) points the
+    process at a scratch DATABASE_PATH by mutating os.environ — safe for a short-lived CLI
+    process, but the dashboard is a long-running server handling concurrent requests against the
+    REAL database on every other endpoint, so mutating that env var in-process here would risk a
+    concurrent /api/status or /api/halt call reading/writing the wrong database."""
+    fd, out_path = tempfile.mkstemp(suffix=".json")
+    os.close(fd)
+    try:
+        cmd = [
+            sys.executable, "-m", "scripts.backtest",
+            "--symbols", *symbols, "--start", start, "--end", end,
+            "--interval", interval, "--out", out_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            tail = (result.stdout + result.stderr).strip().splitlines()
+            raise RuntimeError("\n".join(tail[-15:]) or "backtest process failed with no output")
+        with open(out_path) as f:
+            return json.load(f)
+    finally:
+        if os.path.exists(out_path):
+            os.remove(out_path)
 
 
-def _render(status: dict) -> str:
+def _render(status: dict, dashboard_key: str = "") -> str:
     updated = status.get("updated_at") or "never"
     if updated != "never":
         try:
@@ -84,7 +97,7 @@ def _render(status: dict) -> str:
     else:
         switch_button = '<button id="switch-btn" class="switch-btn halt" onclick="doHalt()">Halt trading</button>'
 
-    mkt_state, mkt_label, now_ist = _market_status_ist()
+    mkt_state, mkt_label, now_ist = market_status_ist()
     mkt_color = {"OPEN": "#2ecc71", "PRE-OPEN": "#f39c12",
                  "CLOSING": "#f39c12", "CLOSED": "#8b949e"}[mkt_state]
     clock_str = now_ist.strftime("%H:%M:%S")
@@ -206,6 +219,7 @@ def _render(status: dict) -> str:
 </head>
 <body>
     <h1>Groww Trading Agent <span class="badge">{status_text}</span>{switch_button}</h1>
+    <p><a href="/backtest{('?key=' + dashboard_key) if dashboard_key else ''}" style="color:#58a6ff;">Backtest &amp; market replay →</a></p>
     <div class="market-bar">
         <span class="mkt-dot" style="background:{mkt_color};"></span>
         <span class="mkt-state">NSE: {mkt_state}</span>
@@ -314,7 +328,7 @@ def _build_status_view() -> dict:
 def dashboard(request: Request):
     _check_auth(request)
     status = _build_status_view()
-    return _render(status)
+    return _render(status, dashboard_key=request.query_params.get("key", ""))
 
 
 @app.get("/api/status")
@@ -342,3 +356,145 @@ def api_resume(request: Request, reason: str = "manual resume (dashboard)"):
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
     return JSONResponse({"halted": False})
+
+
+def _render_backtest_page(dashboard_key: str, form: dict, result: dict | None,
+                           error: str | None) -> str:
+    from core.db import optimization_repo
+
+    key_qs = f"?key={dashboard_key}" if dashboard_key else ""
+    key_hidden = f'<input type="hidden" name="key" value="{dashboard_key}">' if dashboard_key else ""
+
+    if error:
+        result_html = f'<div class="card" style="border-color:#e74c3c;"><h3 style="margin-top:0;color:#e74c3c;">Backtest failed</h3><pre style="white-space:pre-wrap;font-size:0.85rem;color:#e6edf3;">{error}</pre></div>'
+    elif result:
+        def _fmt(v):
+            return "—" if v is None else v
+        result_html = f"""
+        <div class="card">
+            <h3 style="margin-top:0;">Result</h3>
+            <div class="stat"><div class="label">Bars processed</div><div class="value">{result.get('bars_processed')}</div></div>
+            <div class="stat"><div class="label">Trades</div><div class="value">{result.get('total_trades')}</div></div>
+            <div class="stat"><div class="label">Win rate</div><div class="value">{_fmt(result.get('win_rate_pct'))}{'%' if result.get('win_rate_pct') is not None else ''}</div></div>
+            <div class="stat"><div class="label">Net P&amp;L</div><div class="value">₹{result.get('net_pnl', 0):,.2f}</div></div>
+            <div class="stat"><div class="label">Max drawdown</div><div class="value">₹{result.get('max_drawdown', 0):,.2f}</div></div>
+        </div>
+        """
+    else:
+        result_html = ""
+
+    runs = optimization_repo.get_recent_runs(limit=10)
+    opt_rows = ""
+    for run in runs:
+        best = run["candidates"][0] if run["candidates"] else None
+        baseline_out = run["baseline"]["out_sample"]
+        best_out = best["out_sample"] if best else None
+        flag = " (insufficient sample)" if best and best.get("insufficient_sample") else ""
+        opt_rows += (
+            f"<tr><td>{run['run_at'][:19]}</td><td>{run['symbol']}</td>"
+            f"<td>₹{baseline_out['net_pnl']:.2f} ({baseline_out['total_trades']} trades)</td>"
+            f"<td>{'₹%.2f (%d trades)%s' % (best_out['net_pnl'], best_out['total_trades'], flag) if best_out else '—'}</td>"
+            f"<td>{run['combinations_tried']}</td></tr>"
+        )
+    opt_rows = opt_rows or "<tr><td colspan='5'>No nightly optimization runs yet.</td></tr>"
+
+    return f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Backtest &amp; Market Replay — Groww Agent</title>
+    <style>
+        body {{ font-family: -apple-system, sans-serif; background: #0d1117; color: #e6edf3;
+                max-width: 900px; margin: 40px auto; padding: 0 20px; }}
+        h1 {{ font-size: 1.4rem; }}
+        table {{ width: 100%; border-collapse: collapse; margin-top: 12px; }}
+        th, td {{ text-align: left; padding: 6px 10px; border-bottom: 1px solid #30363d;
+                   font-size: 0.9rem; }}
+        th {{ color: #8b949e; font-weight: 500; }}
+        .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+                  padding: 16px; margin-bottom: 20px; }}
+        .stat {{ display: inline-block; margin-right: 30px; }}
+        .stat .label {{ color: #8b949e; font-size: 0.8rem; }}
+        .stat .value {{ font-size: 1.3rem; font-weight: 600; }}
+        label {{ display: block; margin-top: 10px; color: #8b949e; font-size: 0.85rem; }}
+        input, select {{ background: #0d1117; color: #e6edf3; border: 1px solid #30363d;
+                          border-radius: 4px; padding: 6px 8px; margin-top: 4px; width: 200px; }}
+        button.run-btn {{ margin-top: 16px; padding: 8px 20px; border-radius: 6px; border: none;
+                           background: #58a6ff; color: #0d1117; font-weight: 600; cursor: pointer; }}
+    </style>
+</head>
+<body>
+    <h1>Backtest &amp; Market Replay</h1>
+    <p><a href="/{key_qs}" style="color:#58a6ff;">← Back to dashboard</a></p>
+    <p style="color:#8b949e; font-size:0.85rem;">
+        Runs the real strategy against historical Groww candle data via a paper broker — never
+        places a real order. Groww caps query windows: 30 days max for intraday intervals
+        (1minute/5minute/15minute/1hour), 180 days max for 1day.
+    </p>
+
+    <div class="card">
+        <form method="post" action="/backtest">
+            {key_hidden}
+            <label>Symbols (comma-separated)
+                <input type="text" name="symbols" value="{form.get('symbols', 'RELIANCE')}">
+            </label>
+            <label>Start
+                <input type="text" name="start" value="{form.get('start', '')}" placeholder="YYYY-MM-DD">
+            </label>
+            <label>End
+                <input type="text" name="end" value="{form.get('end', '')}" placeholder="YYYY-MM-DD">
+            </label>
+            <label>Interval
+                <select name="interval">
+                    {"".join(f'<option value="{iv}" {"selected" if form.get("interval") == iv else ""}>{iv}</option>' for iv in ["5minute", "1minute", "15minute", "1hour", "1day"])}
+                </select>
+            </label>
+            <button type="submit" class="run-btn">Run backtest</button>
+        </form>
+    </div>
+
+    {result_html}
+
+    <div class="card">
+        <h3 style="margin-top:0;">Nightly optimization history</h3>
+        <p style="color:#8b949e; font-size:0.85rem; margin-top:-8px;">
+            Automated off-hours parameter sweeps (see scripts/nightly_optimize.py). Report only —
+            nothing here is ever applied automatically; adopting a candidate requires manually
+            editing strategies/ma_rsi_strategy.py and redeploying.
+        </p>
+        <table>
+            <tr><th>Run</th><th>Symbol</th><th>Baseline (out-of-sample)</th><th>Best candidate (out-of-sample)</th><th>Combos tried</th></tr>
+            {opt_rows}
+        </table>
+    </div>
+</body>
+</html>
+"""
+
+
+@app.get("/backtest", response_class=HTMLResponse)
+def backtest_page(request: Request):
+    _check_auth(request)
+    key = request.query_params.get("key", "")
+    return _render_backtest_page(key, form={"interval": "5minute"}, result=None, error=None)
+
+
+@app.post("/backtest", response_class=HTMLResponse)
+def backtest_run(request: Request, symbols: str = Form("RELIANCE"), start: str = Form(""),
+                  end: str = Form(""), interval: str = Form("5minute"), key: str = Form("")):
+    if DASHBOARD_PASSWORD and key != DASHBOARD_PASSWORD:
+        raise HTTPException(status_code=401, detail="Missing or incorrect key")
+
+    form = {"symbols": symbols, "start": start, "end": end, "interval": interval}
+    symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    result, error = None, None
+    if not symbol_list or not start or not end:
+        error = "Symbols, start, and end are all required."
+    else:
+        try:
+            result = _run_backtest_subprocess(symbol_list, start, end, interval)
+        except Exception as e:
+            error = str(e)
+
+    return _render_backtest_page(key, form=form, result=result, error=error)
