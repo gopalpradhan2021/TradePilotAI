@@ -57,13 +57,16 @@ def update_order_status(order_id: int, *, status: str, broker_order_id: str | No
         conn.commit()
 
 
-def get_recent_orders(limit: int = 20) -> list[dict]:
+def get_recent_orders(limit: int | None = 20) -> list[dict]:
+    query = """
+        SELECT symbol, side, qty, segment, status, fill_price, reason, message, created_at
+        FROM orders ORDER BY created_at DESC, id DESC
+    """
+    params: tuple = ()
+    if limit is not None:
+        query += " LIMIT ?"
+        params = (limit,)
+
     with get_connection() as conn:
-        rows = conn.execute(
-            """
-            SELECT symbol, side, qty, segment, status, fill_price, reason, message, created_at
-            FROM orders ORDER BY created_at DESC, id DESC LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
+        rows = conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]

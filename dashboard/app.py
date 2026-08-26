@@ -185,7 +185,7 @@ def _render(status: dict) -> str:
     </div>
 
     <div class="card">
-        <h3 style="margin-top:0;">Recent orders (last 20)</h3>
+        <h3 style="margin-top:0;">All orders</h3>
         <table><tr><th>Time</th><th>Symbol</th><th>Segment</th><th>Side</th><th>Qty</th><th>Status</th><th>Reason</th></tr>{order_rows}</table>
     </div>
 </body>
@@ -222,7 +222,7 @@ def _build_status_view() -> dict:
             "status": o["status"],
             "reason": o["message"] if o["status"] == "BLOCKED" else o["reason"],
         }
-        for o in reversed(orders_repo.get_recent_orders(20))
+        for o in reversed(orders_repo.get_recent_orders(limit=None))
     ]
 
     return {
