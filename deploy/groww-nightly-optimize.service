@@ -1,0 +1,13 @@
+[Unit]
+Description=Nightly off-hours backtest/strategy-parameter sweep (report only, never auto-applied)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=trader
+Group=trader
+WorkingDirectory=/home/trader/groww-agent
+ExecStart=/home/trader/groww-agent/venv/bin/python -m scripts.nightly_optimize
+StandardOutput=append:/home/trader/groww-agent/logs/nightly_optimize.log
+StandardError=append:/home/trader/groww-agent/logs/nightly_optimize.log

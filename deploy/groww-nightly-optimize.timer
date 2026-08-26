@@ -1,0 +1,9 @@
+[Unit]
+Description=Fire groww-nightly-optimize daily at 4:30 PM IST (an hour after the 3:30 PM close)
+
+[Timer]
+OnCalendar=*-*-* 11:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
