@@ -501,11 +501,6 @@ def _render(status: dict) -> str:
             </div>
 
             <div class="card">
-                <h3 style="margin-top:0;">Latest prices</h3>
-                <div class="ltp-grid">{ltp_rows}</div>
-            </div>
-
-            <div class="card">
                 <h3 style="margin-top:0;">Capital &amp; risk</h3>
                 <div style="display:flex; flex-direction:column; gap:10px;">
                     <div style="display:flex; justify-content:space-between; border-bottom:1px solid #21262d; padding-bottom:8px;">
@@ -529,6 +524,11 @@ def _render(status: dict) -> str:
                         <span style="font-weight:600; color:{'#2ecc71' if status.get('allow_fno') else '#8b949e'};">{'Enabled' if status.get('allow_fno') else 'Disabled'}</span>
                     </div>
                 </div>
+            </div>
+
+            <div class="card">
+                <h3 style="margin-top:0;">Latest prices</h3>
+                <div class="ltp-grid">{ltp_rows}</div>
             </div>
 
             <div class="card">
