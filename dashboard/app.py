@@ -303,10 +303,14 @@ def _render(status: dict) -> str:
                 f"background:{bg}; color:{fg}; font-size:0.72rem; font-weight:700; "
                 f"letter-spacing:0.03em;'>{order_status}</span>")
 
+    def _side_cell(side: str) -> str:
+        color = "#2ecc71" if side == "BUY" else "#e74c3c" if side == "SELL" else "#e6edf3"
+        return f"<span style='color:{color}; font-weight:600;'>{side}</span>"
+
     order_rows = "".join(
         f"<tr><td class='mono dim'>{o.get('created_at', '')[:19]}</td><td>{o.get('symbol')}</td>"
         f"<td>{o.get('segment', 'CASH')}</td>"
-        f"<td>{o.get('side')}</td><td class='mono num'>{o.get('qty')}</td>"
+        f"<td>{_side_cell(o.get('side', ''))}</td><td class='mono num'>{o.get('qty')}</td>"
         f"<td>{_status_chip(o.get('status', ''))}</td><td class='dim'>{o.get('reason', '')}</td></tr>"
         for o in reversed(status.get("recent_orders", []))
     ) or "<tr><td colspan='7'>No orders yet</td></tr>"
@@ -368,8 +372,7 @@ def _render(status: dict) -> str:
         .dashboard-grid {{ display: grid; grid-template-columns: 1fr 320px; gap: 20px;
                             margin-top: 18px; align-items: start; }}
         @media (max-width: 900px) {{ .dashboard-grid {{ grid-template-columns: 1fr; }} }}
-        .ltp-grid {{ display: grid; grid-template-columns: 1fr 1fr; column-gap: 24px; }}
-        @media (max-width: 480px) {{ .ltp-grid {{ grid-template-columns: 1fr; }} }}
+        .ltp-grid {{ display: grid; grid-template-columns: 1fr; }}
         .ltp-row {{ display: flex; justify-content: space-between; padding: 8px 0;
                     border-bottom: 1px solid #21262d; font-size: 0.85rem; }}
         .sig-terminal {{ font-size: 0.8rem; }}
@@ -466,11 +469,6 @@ def _render(status: dict) -> str:
     <div class="dashboard-grid">
         <div class="col-main">
             <div class="card">
-                <h3 style="margin-top:0;">Latest prices</h3>
-                <div class="ltp-grid">{ltp_rows}</div>
-            </div>
-
-            <div class="card">
                 <h3 style="margin-top:0;">Strategy signals</h3>
                 <p style="color:#8b949e; font-size:0.85rem; margin-top:-8px;">
                     What the strategy is currently seeing per symbol — how close it is to a real
@@ -488,6 +486,11 @@ def _render(status: dict) -> str:
                 </div>
                 <div class="stat" style="margin-top:10px;"><div class="label">Symbols watched</div><div class="value">{len(status.get('symbols', []))}</div></div>
                 {"<div class='stat' style='margin-top:10px;'><div class='label'>Halt reason</div><div class='value' style='color:#e74c3c; font-size:0.9rem;'>" + status.get('halt_reason','') + "</div></div>" if halted else ""}
+            </div>
+
+            <div class="card">
+                <h3 style="margin-top:0;">Latest prices</h3>
+                <div class="ltp-grid">{ltp_rows}</div>
             </div>
 
             <div class="card">
