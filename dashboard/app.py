@@ -723,18 +723,25 @@ def _render_backtest_page(form: dict, result: dict | None, error: str | None) ->
     from core.db import optimization_repo
 
     if error:
-        result_html = f'<div class="card" style="border-color:#e74c3c;"><h3 style="margin-top:0;color:#e74c3c;">Backtest failed</h3><pre style="white-space:pre-wrap;font-size:0.85rem;color:#e6edf3;">{error}</pre></div>'
+        result_html = f'''<div class="card" style="border-color:#e74c3c;">
+            <h3 style="margin-top:0;color:#e74c3c;">Backtest failed</h3>
+            <pre class="mono" style="white-space:pre-wrap;font-size:0.85rem;color:#e6edf3;margin:0;">{error}</pre>
+        </div>'''
     elif result:
         def _fmt(v):
             return "—" if v is None else v
+        pnl = result.get('net_pnl', 0)
+        pnl_color = "#e74c3c" if pnl < 0 else "#2ecc71"
         result_html = f"""
         <div class="card">
             <h3 style="margin-top:0;">Result</h3>
-            <div class="stat"><div class="label">Bars processed</div><div class="value">{result.get('bars_processed')}</div></div>
-            <div class="stat"><div class="label">Trades</div><div class="value">{result.get('total_trades')}</div></div>
-            <div class="stat"><div class="label">Win rate</div><div class="value">{_fmt(result.get('win_rate_pct'))}{'%' if result.get('win_rate_pct') is not None else ''}</div></div>
-            <div class="stat"><div class="label">Net P&amp;L</div><div class="value">₹{result.get('net_pnl', 0):,.2f}</div></div>
-            <div class="stat"><div class="label">Max drawdown</div><div class="value">₹{result.get('max_drawdown', 0):,.2f}</div></div>
+            <div class="stat-row">
+                <div class="stat"><div class="label">Bars processed</div><div class="value mono">{result.get('bars_processed')}</div></div>
+                <div class="stat"><div class="label">Trades</div><div class="value mono">{result.get('total_trades')}</div></div>
+                <div class="stat"><div class="label">Win rate</div><div class="value mono">{_fmt(result.get('win_rate_pct'))}{'%' if result.get('win_rate_pct') is not None else ''}</div></div>
+                <div class="stat"><div class="label">Net P&amp;L</div><div class="value mono" style="color:{pnl_color};">₹{pnl:,.2f}</div></div>
+                <div class="stat"><div class="label">Max drawdown</div><div class="value mono">₹{result.get('max_drawdown', 0):,.2f}</div></div>
+            </div>
         </div>
         """
     else:
@@ -746,14 +753,15 @@ def _render_backtest_page(form: dict, result: dict | None, error: str | None) ->
         best = run["candidates"][0] if run["candidates"] else None
         baseline_out = run["baseline"]["out_sample"]
         best_out = best["out_sample"] if best else None
-        flag = " (insufficient sample)" if best and best.get("insufficient_sample") else ""
+        flag = (" <span class='dim' style=\"font-size:0.7rem;\">(insufficient sample)</span>"
+                if best and best.get("insufficient_sample") else "")
         opt_rows += (
-            f"<tr><td>{run['run_at'][:19]}</td><td>{run['symbol']}</td>"
-            f"<td>₹{baseline_out['net_pnl']:.2f} ({baseline_out['total_trades']} trades)</td>"
-            f"<td>{'₹%.2f (%d trades)%s' % (best_out['net_pnl'], best_out['total_trades'], flag) if best_out else '—'}</td>"
-            f"<td>{run['combinations_tried']}</td></tr>"
+            f"<tr><td class='mono dim'>{run['run_at'][:19]}</td><td>{run['symbol']}</td>"
+            f"<td class='mono num'>₹{baseline_out['net_pnl']:.2f} <span class='dim'>({baseline_out['total_trades']} trades)</span></td>"
+            f"<td class='mono num'>{'₹%.2f <span class=\"dim\">(%d trades)</span>%s' % (best_out['net_pnl'], best_out['total_trades'], flag) if best_out else '—'}</td>"
+            f"<td class='mono num'>{run['combinations_tried']}</td></tr>"
         )
-    opt_rows = opt_rows or "<tr><td colspan='5'>No nightly optimization runs yet.</td></tr>"
+    opt_rows = opt_rows or "<tr><td colspan='5' class='dim'>No nightly optimization runs yet.</td></tr>"
 
     return f"""
 <!DOCTYPE html>
@@ -761,30 +769,78 @@ def _render_backtest_page(form: dict, result: dict | None, error: str | None) ->
 <head>
     <meta charset="utf-8">
     <title>Backtest &amp; Market Replay — Groww Agent</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap">
     <style>
+        * {{ box-sizing: border-box; }}
         body {{ font-family: -apple-system, sans-serif; background: #0d1117; color: #e6edf3;
-                max-width: 900px; margin: 40px auto; padding: 0 20px; }}
-        h1 {{ font-size: 1.4rem; }}
-        table {{ width: 100%; border-collapse: collapse; margin-top: 12px; }}
-        th, td {{ text-align: left; padding: 6px 10px; border-bottom: 1px solid #30363d;
-                   font-size: 0.9rem; }}
-        th {{ color: #8b949e; font-weight: 500; }}
-        .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px;
-                  padding: 16px; margin-bottom: 20px; }}
-        .stat {{ display: inline-block; margin-right: 30px; }}
-        .stat .label {{ color: #8b949e; font-size: 0.8rem; }}
-        .stat .value {{ font-size: 1.3rem; font-weight: 600; }}
-        label {{ display: block; margin-top: 10px; color: #8b949e; font-size: 0.85rem; }}
+                max-width: 1180px; margin: 0 auto; padding: 0 20px 60px; }}
+        .mono {{ font-family: 'IBM Plex Mono', 'SF Mono', Consolas, monospace; }}
+        .num {{ text-align: right; }}
+        .dim {{ color: #8b949e; }}
+        table {{ width: 100%; border-collapse: collapse; margin-top: 4px; }}
+        th, td {{ text-align: left; padding: 8px 10px; border-bottom: 1px solid #21262d;
+                   font-size: 0.85rem; }}
+        th {{ color: #7d8590; font-weight: 500; font-size: 0.72rem; text-transform: uppercase;
+              letter-spacing: 0.04em; }}
+        th.num, td.num {{ text-align: right; }}
+        tr:last-child td {{ border-bottom: none; }}
+        .scroll-table {{ max-height: 400px; overflow-y: auto; }}
+        .scroll-table th {{ position: sticky; top: 0; background: #161b22; }}
+        .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+                  padding: 16px 18px; margin-bottom: 18px; }}
+        .stat {{ display: flex; flex-direction: column; gap: 3px; margin-right: 30px; }}
+        .stat .label {{ color: #7d8590; font-size: 0.72rem; text-transform: uppercase;
+                         letter-spacing: 0.04em; }}
+        .stat .value {{ font-size: 1.2rem; font-weight: 600; }}
+        .stat-row {{ display: flex; flex-wrap: wrap; gap: 20px 0; }}
+        .form-grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px;
+                      align-items: end; }}
+        @media (max-width: 700px) {{ .form-grid {{ grid-template-columns: 1fr 1fr; }} }}
+        .field {{ display: flex; flex-direction: column; gap: 6px; }}
+        .field label {{ color: #7d8590; font-size: 0.72rem; text-transform: uppercase;
+                         letter-spacing: 0.04em; }}
         input, select {{ background: #0d1117; color: #e6edf3; border: 1px solid #30363d;
-                          border-radius: 4px; padding: 6px 8px; margin-top: 4px; width: 200px; }}
-        button.run-btn {{ margin-top: 16px; padding: 8px 20px; border-radius: 6px; border: none;
-                           background: #58a6ff; color: #0d1117; font-weight: 600; cursor: pointer; }}
+                          border-radius: 5px; padding: 8px 10px; font-size: 0.85rem;
+                          font-family: inherit; width: 100%; }}
+        input:focus, select:focus {{ outline: 2px solid #58a6ff; outline-offset: -1px;
+                                      border-color: #58a6ff; }}
+        button.run-btn {{ margin-top: 18px; padding: 9px 22px; border-radius: 5px; border: none;
+                           background: #58a6ff; color: #0d1117; font-weight: 700; font-size: 0.85rem;
+                           cursor: pointer; }}
+        .topnav {{ display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
+                   padding: 14px 4px; border-bottom: 1px solid #21262d; margin-bottom: 18px; }}
+        .topnav-left {{ display: flex; align-items: center; gap: 12px; }}
+        .topnav-title {{ font-size: 1.2rem; font-weight: 700; letter-spacing: -0.01em; }}
+        .topnav-links {{ display: flex; align-items: center; gap: 24px; }}
+        .topnav-link {{ color: #8b949e; font-size: 0.76rem; font-weight: 600; text-transform: uppercase;
+                         letter-spacing: 0.05em; text-decoration: none; padding-bottom: 4px;
+                         border-bottom: 2px solid transparent; }}
+        .topnav-link:hover {{ color: #e6edf3; }}
+        .topnav-link.active {{ color: #58a6ff; border-bottom-color: #58a6ff; }}
+        .topnav-right {{ display: flex; align-items: center; gap: 16px; justify-self: end; }}
+        .topnav-logout {{ color: #8b949e; font-size: 0.82rem; text-decoration: none; }}
+        .topnav-logout:hover {{ color: #e6edf3; }}
+        @media (max-width: 700px) {{
+            .topnav {{ grid-template-columns: 1fr; gap: 10px; justify-items: start; }}
+            .topnav-right {{ justify-self: start; }}
+        }}
     </style>
 </head>
 <body>
-    <h1>Backtest &amp; Market Replay</h1>
-    <p><a href="/" style="color:#58a6ff;">← Back to dashboard</a></p>
-    <p style="color:#8b949e; font-size:0.85rem;">
+    <div class="topnav">
+        <div class="topnav-left">
+            <span class="topnav-title">TradePilotAI</span>
+        </div>
+        <nav class="topnav-links">
+            <a class="topnav-link" href="/">Dashboard</a>
+            <a class="topnav-link active" href="/backtest">Backtest</a>
+        </nav>
+        <div class="topnav-right">
+            <a href="/logout" class="topnav-logout">Log out</a>
+        </div>
+    </div>
+
+    <p class="dim" style="font-size:0.85rem; margin-top:0;">
         Runs the real strategy against historical Groww candle data via a paper broker — never
         places a real order. Groww caps query windows: 30 days max for intraday intervals
         (1minute/5minute/15minute/1hour), 180 days max for 1day.
@@ -792,20 +848,26 @@ def _render_backtest_page(form: dict, result: dict | None, error: str | None) ->
 
     <div class="card">
         <form method="post" action="/backtest">
-            <label>Symbols (comma-separated)
-                <input type="text" name="symbols" value="{form.get('symbols', 'RELIANCE')}">
-            </label>
-            <label>Start
-                <input type="text" name="start" value="{form.get('start', '')}" placeholder="YYYY-MM-DD">
-            </label>
-            <label>End
-                <input type="text" name="end" value="{form.get('end', '')}" placeholder="YYYY-MM-DD">
-            </label>
-            <label>Interval
-                <select name="interval">
-                    {"".join(f'<option value="{iv}" {"selected" if form.get("interval") == iv else ""}>{iv}</option>' for iv in ["5minute", "1minute", "15minute", "1hour", "1day"])}
-                </select>
-            </label>
+            <div class="form-grid">
+                <div class="field">
+                    <label>Symbols (comma-separated)</label>
+                    <input type="text" name="symbols" value="{form.get('symbols', 'RELIANCE')}">
+                </div>
+                <div class="field">
+                    <label>Start</label>
+                    <input type="text" name="start" value="{form.get('start', '')}" placeholder="YYYY-MM-DD">
+                </div>
+                <div class="field">
+                    <label>End</label>
+                    <input type="text" name="end" value="{form.get('end', '')}" placeholder="YYYY-MM-DD">
+                </div>
+                <div class="field">
+                    <label>Interval</label>
+                    <select name="interval">
+                        {"".join(f'<option value="{iv}" {"selected" if form.get("interval") == iv else ""}>{iv}</option>' for iv in ["5minute", "1minute", "15minute", "1hour", "1day"])}
+                    </select>
+                </div>
+            </div>
             <button type="submit" class="run-btn">Run backtest</button>
         </form>
     </div>
@@ -814,15 +876,17 @@ def _render_backtest_page(form: dict, result: dict | None, error: str | None) ->
 
     <div class="card">
         <h3 style="margin-top:0;">Nightly optimization history</h3>
-        <p style="color:#8b949e; font-size:0.85rem; margin-top:-8px;">
+        <p class="dim" style="font-size:0.85rem; margin-top:-8px;">
             Automated off-hours parameter sweeps (see scripts/nightly_optimize.py). Report only —
             nothing here is ever applied automatically; adopting a candidate requires manually
             editing strategies/ma_rsi_strategy.py and redeploying.
         </p>
-        <table>
-            <tr><th>Run</th><th>Symbol</th><th>Baseline (out-of-sample)</th><th>Best candidate (out-of-sample)</th><th>Combos tried</th></tr>
-            {opt_rows}
-        </table>
+        <div class="scroll-table">
+            <table>
+                <tr><th>Run</th><th>Symbol</th><th class="num">Baseline (out-of-sample)</th><th class="num">Best candidate (out-of-sample)</th><th class="num">Combos tried</th></tr>
+                {opt_rows}
+            </table>
+        </div>
     </div>
 </body>
 </html>
