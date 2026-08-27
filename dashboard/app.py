@@ -290,9 +290,10 @@ def _render(status: dict) -> str:
         else:
             rsi_cell = f"<span class='dim'>RSI {rsi:.1f} [{band[0]}-{band[1]}]</span>"
 
+        status_cell = "" if watching else f"<span style='color:{dot_color};'>{label}</span>"
         strategy_rows += (
             f"<div class='sig-row'><span class='{dot_class}' style='background:{dot_bg};'></span>"
-            f"<span class='sig-symbol'>{sym}</span><span style='color:{dot_color};'>{label}</span>"
+            f"<span class='sig-symbol'>{sym}</span>{status_cell}"
             f"<span class='dim'>{detail}</span><span>{gap_cell}</span><span>{rsi_cell}</span></div>"
         )
     strategy_rows = strategy_rows or "<div class='dim'>No symbols yet</div>"
