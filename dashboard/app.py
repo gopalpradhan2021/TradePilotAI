@@ -543,6 +543,15 @@ def _render(status: dict) -> str:
 
         <div class="col-side">
             <div class="card">
+                <h3 style="margin-top:0;">Performance</h3>
+                <div class="stat-row">
+                    <div class="stat"><div class="label">Wins</div><div class="value" style="color:#2ecc71;">{win_count}</div></div>
+                    <div class="stat"><div class="label">Losses</div><div class="value" style="color:#e74c3c;">{loss_count}</div></div>
+                    <div class="stat"><div class="label">Win rate</div><div class="value">{win_rate_str}</div></div>
+                </div>
+            </div>
+
+            <div class="card">
                 <h3 style="margin-top:0;">Capital &amp; risk</h3>
                 <div style="display:flex; flex-direction:column; gap:10px;">
                     <div style="display:flex; justify-content:space-between; border-bottom:1px solid #21262d; padding-bottom:8px;">
@@ -571,15 +580,6 @@ def _render(status: dict) -> str:
             <div class="card">
                 <h3 style="margin-top:0;">Latest prices</h3>
                 <div class="ltp-grid">{ltp_rows}</div>
-            </div>
-
-            <div class="card">
-                <h3 style="margin-top:0;">Performance</h3>
-                <div class="stat-row">
-                    <div class="stat"><div class="label">Wins</div><div class="value" style="color:#2ecc71;">{win_count}</div></div>
-                    <div class="stat"><div class="label">Losses</div><div class="value" style="color:#e74c3c;">{loss_count}</div></div>
-                    <div class="stat"><div class="label">Win rate</div><div class="value">{win_rate_str}</div></div>
-                </div>
             </div>
         </div>
     </div>
