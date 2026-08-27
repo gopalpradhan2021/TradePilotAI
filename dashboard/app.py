@@ -476,6 +476,18 @@ def _render(status: dict) -> str:
                 </p>
                 <div class="sig-terminal mono">{strategy_rows}</div>
             </div>
+
+            <div class="card">
+                <h3 style="margin-top:0;">Open positions</h3>
+                <table><tr><th>Symbol</th><th class="num">Qty</th><th class="num">Entry price</th><th class="num">Current price</th><th class="num">Unrealized P&amp;L</th></tr>{position_rows}</table>
+            </div>
+
+            <div class="card">
+                <h3 style="margin-top:0;">All orders</h3>
+                <div class="scroll-table">
+                    <table><tr><th>Time</th><th>Symbol</th><th>Segment</th><th>Side</th><th class="num">Qty</th><th>Status</th><th>Reason</th></tr>{order_rows}</table>
+                </div>
+            </div>
         </div>
 
         <div class="col-side">
@@ -527,18 +539,6 @@ def _render(status: dict) -> str:
                     <div class="stat"><div class="label">Win rate</div><div class="value">{win_rate_str}</div></div>
                 </div>
             </div>
-        </div>
-    </div>
-
-    <div class="card">
-        <h3 style="margin-top:0;">Open positions</h3>
-        <table><tr><th>Symbol</th><th class="num">Qty</th><th class="num">Entry price</th><th class="num">Current price</th><th class="num">Unrealized P&amp;L</th></tr>{position_rows}</table>
-    </div>
-
-    <div class="card">
-        <h3 style="margin-top:0;">All orders</h3>
-        <div class="scroll-table">
-            <table><tr><th>Time</th><th>Symbol</th><th>Segment</th><th>Side</th><th class="num">Qty</th><th>Status</th><th>Reason</th></tr>{order_rows}</table>
         </div>
     </div>
 </body>
