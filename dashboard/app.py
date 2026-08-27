@@ -238,7 +238,7 @@ def _render(status: dict) -> str:
     clock_str = now_ist.strftime("%H:%M:%S")
 
     ltp_rows = "".join(
-        f"<tr><td>{sym}</td><td>{price if price is not None else '—'}</td></tr>"
+        f"<tr><td>{sym}</td><td class='mono num'>{price if price is not None else '—'}</td></tr>"
         for sym, price in status.get("last_ltp", {}).items()
     ) or "<tr><td colspan='2'>No symbols yet</td></tr>"
 
@@ -262,25 +262,34 @@ def _render(status: dict) -> str:
         if gap_pct is None:
             gap_cell = "—"
         else:
-            gap_color = "#2ecc71" if gap_pct >= min_gap else "#8b949e"
-            gap_cell = f"<span style='color:{gap_color};'>{gap_pct:.4f}%</span> (need {min_gap:.4f}%)"
+            gap_color = "#2ecc71" if gap_pct >= min_gap else "#d29922" if gap_pct >= min_gap * 0.5 else "#8b949e"
+            gap_cell = f"<span style='color:{gap_color};'>{gap_pct:.4f}%</span> <span class='dim'>(need {min_gap:.4f}%)</span>"
         rsi, band = d.get("rsi"), d.get("rsi_entry_band")
-        rsi_cell = f"{rsi:.1f} (band {band[0]}-{band[1]})" if rsi is not None and band else "—"
+        rsi_cell = f"{rsi:.1f} <span class='dim'>(band {band[0]}-{band[1]})</span>" if rsi is not None and band else "—"
         ma_cell = (
             f"{d['short_ma']:.2f} / {d['long_ma']:.2f}"
             if d.get("short_ma") is not None and d.get("long_ma") is not None else "—"
         )
         strategy_rows += (
             f"<tr><td>{sym}</td><td>{_signal_status(d)}</td>"
-            f"<td>{ma_cell}</td><td>{gap_cell}</td><td>{rsi_cell}</td></tr>"
+            f"<td class='mono num'>{ma_cell}</td><td class='mono num'>{gap_cell}</td><td class='mono num'>{rsi_cell}</td></tr>"
         )
     strategy_rows = strategy_rows or "<tr><td colspan='5'>No symbols yet</td></tr>"
 
+    def _status_chip(order_status: str) -> str:
+        fg, bg = {
+            "FILLED": ("#2ecc71", "rgba(46,204,113,0.15)"),
+            "PENDING": ("#d29922", "rgba(210,153,34,0.15)"),
+        }.get(order_status, ("#e74c3c", "rgba(231,76,60,0.15)"))  # BLOCKED/ERROR/other
+        return (f"<span style='display:inline-block; padding:2px 9px; border-radius:3px; "
+                f"background:{bg}; color:{fg}; font-size:0.72rem; font-weight:700; "
+                f"letter-spacing:0.03em;'>{order_status}</span>")
+
     order_rows = "".join(
-        f"<tr><td>{o.get('created_at', '')[:19]}</td><td>{o.get('symbol')}</td>"
+        f"<tr><td class='mono dim'>{o.get('created_at', '')[:19]}</td><td>{o.get('symbol')}</td>"
         f"<td>{o.get('segment', 'CASH')}</td>"
-        f"<td>{o.get('side')}</td><td>{o.get('qty')}</td>"
-        f"<td>{o.get('status')}</td><td>{o.get('reason', '')}</td></tr>"
+        f"<td>{o.get('side')}</td><td class='mono num'>{o.get('qty')}</td>"
+        f"<td>{_status_chip(o.get('status', ''))}</td><td class='dim'>{o.get('reason', '')}</td></tr>"
         for o in reversed(status.get("recent_orders", []))
     ) or "<tr><td colspan='7'>No orders yet</td></tr>"
 
@@ -291,10 +300,10 @@ def _render(status: dict) -> str:
         return f"<span style='color:{color};'>₹{v:,.2f}</span>"
 
     position_rows = "".join(
-        f"<tr><td>{p['symbol']}</td><td>{p['qty']}</td>"
-        f"<td>₹{p['entry_price']:.2f}</td>"
-        f"<td>{'₹' + format(p['current_price'], '.2f') if p['current_price'] is not None else '—'}</td>"
-        f"<td>{_fmt_pnl(p['unrealized_pnl'])}</td></tr>"
+        f"<tr><td>{p['symbol']}</td><td class='mono num'>{p['qty']}</td>"
+        f"<td class='mono num'>₹{p['entry_price']:.2f}</td>"
+        f"<td class='mono num'>{'₹' + format(p['current_price'], '.2f') if p['current_price'] is not None else '—'}</td>"
+        f"<td class='mono num'>{_fmt_pnl(p['unrealized_pnl'])}</td></tr>"
         for p in status.get("open_positions", [])
     ) or "<tr><td colspan='5'>No open positions</td></tr>"
 
@@ -310,33 +319,50 @@ def _render(status: dict) -> str:
     <meta charset="utf-8">
     <meta http-equiv="refresh" content="10">
     <title>Groww Agent Dashboard</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap">
     <style>
+        * {{ box-sizing: border-box; }}
         body {{ font-family: -apple-system, sans-serif; background: #0d1117; color: #e6edf3;
-                max-width: 900px; margin: 40px auto; padding: 0 20px; }}
-        h1 {{ font-size: 1.4rem; }}
-        .badge {{ display: inline-block; padding: 4px 12px; border-radius: 12px;
-                  color: #0d1117; font-weight: 600; background: {status_color}; }}
-        table {{ width: 100%; border-collapse: collapse; margin-top: 12px; }}
-        th, td {{ text-align: left; padding: 6px 10px; border-bottom: 1px solid #30363d;
-                   font-size: 0.9rem; }}
-        th {{ color: #8b949e; font-weight: 500; }}
-        .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px;
-                  padding: 16px; margin-bottom: 20px; }}
-        .stat {{ display: inline-block; margin-right: 30px; }}
-        .stat .label {{ color: #8b949e; font-size: 0.8rem; }}
-        .stat .value {{ font-size: 1.3rem; font-weight: 600; }}
+                max-width: 1180px; margin: 40px auto; padding: 0 20px 60px; }}
+        h1 {{ font-size: 1.3rem; margin: 0; }}
+        .mono {{ font-family: 'IBM Plex Mono', 'SF Mono', Consolas, monospace; }}
+        .num {{ text-align: right; }}
+        .dim {{ color: #8b949e; }}
+        .badge {{ display: inline-block; padding: 4px 12px; border-radius: 4px;
+                  color: #0d1117; font-weight: 700; font-size: 0.78rem; letter-spacing: 0.03em;
+                  background: {status_color}; }}
+        table {{ width: 100%; border-collapse: collapse; margin-top: 4px; }}
+        th, td {{ text-align: left; padding: 8px 10px; border-bottom: 1px solid #21262d;
+                   font-size: 0.85rem; }}
+        th {{ color: #7d8590; font-weight: 500; font-size: 0.72rem; text-transform: uppercase;
+              letter-spacing: 0.04em; }}
+        th.num, td.num {{ text-align: right; }}
+        tr:last-child td {{ border-bottom: none; }}
+        .scroll-table {{ max-height: 340px; overflow-y: auto; }}
+        .scroll-table th {{ position: sticky; top: 0; background: #161b22; }}
+        .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+                  padding: 16px 18px; margin-bottom: 18px; }}
+        .stat {{ display: flex; flex-direction: column; gap: 3px; margin-right: 30px; }}
+        .stat .label {{ color: #7d8590; font-size: 0.72rem; text-transform: uppercase;
+                         letter-spacing: 0.04em; }}
+        .stat .value {{ font-size: 1.2rem; font-weight: 600; }}
+        .stat-row {{ display: flex; flex-wrap: wrap; }}
+        .dashboard-grid {{ display: grid; grid-template-columns: 1fr 320px; gap: 20px;
+                            margin-top: 18px; align-items: start; }}
+        @media (max-width: 900px) {{ .dashboard-grid {{ grid-template-columns: 1fr; }} }}
         .market-bar {{ display: flex; align-items: center; gap: 10px; margin-top: 10px;
-                       font-family: 'SF Mono', Consolas, monospace; font-size: 0.95rem; }}
-        .mkt-dot {{ width: 10px; height: 10px; border-radius: 50%; display: inline-block; }}
+                       font-family: 'IBM Plex Mono', 'SF Mono', Consolas, monospace; font-size: 0.9rem; }}
+        .mkt-dot {{ width: 8px; height: 8px; border-radius: 50%; display: inline-block; }}
         .mkt-state {{ font-weight: 700; letter-spacing: 0.5px; }}
         .mkt-label {{ color: #8b949e; }}
         .ist-clock {{ margin-left: auto; color: #58a6ff; font-weight: 600; }}
-        .switch-btn {{ margin-left: 16px; padding: 6px 16px; border-radius: 6px; border: none;
-                        font-weight: 600; cursor: pointer; font-size: 0.85rem; }}
+        .switch-btn {{ margin-left: 16px; padding: 6px 16px; border-radius: 5px; border: none;
+                        font-weight: 600; cursor: pointer; font-size: 0.82rem; }}
         .switch-btn.halt {{ background: #e74c3c; color: #fff; }}
         .switch-btn.resume {{ background: #2ecc71; color: #0d1117; }}
         .switch-btn:disabled {{ background: #30363d; color: #8b949e; cursor: not-allowed; }}
-        .proc-badge {{ margin-left: 8px; font-family: 'SF Mono', Consolas, monospace; font-size: 0.8rem; }}
+        .proc-badge {{ margin-left: 8px; font-family: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+                        font-size: 0.78rem; }}
     </style>
     <script>
         function tickClock() {{
@@ -389,67 +415,99 @@ def _render(status: dict) -> str:
     </script>
 </head>
 <body>
-    <h1>Groww Trading Agent <span class="badge">{status_text}</span>{switch_button} {proc_badge}</h1>
-    <p>
-        <a href="/backtest" style="color:#58a6ff;">Backtest &amp; market replay →</a>
-        <a href="/logout" style="color:#8b949e; margin-left:16px; font-size:0.85rem;">Log out</a>
-    </p>
+    <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+        <h1>Groww Trading Agent</h1>
+        <span class="badge">{status_text}</span>{switch_button} {proc_badge}
+        <div style="margin-left:auto; display:flex; align-items:center; gap:16px; font-size:0.85rem;">
+            <a href="/backtest" style="color:#58a6ff;">Backtest &amp; market replay →</a>
+            <a href="/logout" style="color:#8b949e;">Log out</a>
+        </div>
+    </div>
     <div class="market-bar">
         <span class="mkt-dot" style="background:{mkt_color};"></span>
         <span class="mkt-state">NSE: {mkt_state}</span>
         <span class="mkt-label">— {mkt_label}</span>
         <span id="ist-clock" class="ist-clock">{clock_str} IST</span>
     </div>
-    <p style="color:#8b949e; font-size:0.85rem;">Last updated: {updated} · auto-refreshes every 10s</p>
+    <p style="color:#8b949e; font-size:0.8rem; margin:6px 0 0;">Last updated: {updated} · auto-refreshes every 10s</p>
 
-    <div class="card">
-        <div class="stat"><div class="label">Mode</div><div class="value">{status.get('mode', 'UNKNOWN')}</div></div>
-        <div class="stat"><div class="label">Trades today</div><div class="value">{status.get('trades_today', 0)}</div></div>
-        <div class="stat"><div class="label">Symbols watched</div><div class="value">{len(status.get('symbols', []))}</div></div>
-        {"<div class='stat'><div class='label'>Halt reason</div><div class='value' style='color:#e74c3c; font-size:0.9rem;'>" + status.get('halt_reason','') + "</div></div>" if halted else ""}
-    </div>
+    <div class="dashboard-grid">
+        <div class="col-main">
+            <div class="card">
+                <h3 style="margin-top:0;">Latest prices</h3>
+                <table><tr><th>Symbol</th><th class="num">Last traded price</th></tr>{ltp_rows}</table>
+            </div>
 
-    <div class="card">
-        <h3 style="margin-top:0;">Capital &amp; risk</h3>
-        <div class="stat"><div class="label">Deployed capital</div><div class="value">₹{status.get('deployed_capital', 0):,.2f}</div></div>
-        <div class="stat"><div class="label">Total capital cap</div><div class="value">₹{status.get('total_capital_cap', 0):,.2f}</div></div>
-        <div class="stat"><div class="label">Realized P&amp;L today</div><div class="value" style="color:{pnl_color};">₹{status.get('realized_pnl_today', 0):,.2f}</div></div>
-        <div class="stat"><div class="label">Daily loss limit</div><div class="value">₹{status.get('max_daily_loss', 0):,.2f}</div></div>
-        <div class="stat"><div class="label">F&amp;O trading</div><div class="value" style="color:{'#2ecc71' if status.get('allow_fno') else '#8b949e'};">{'ENABLED' if status.get('allow_fno') else 'Disabled'}</div></div>
-    </div>
+            <div class="card">
+                <h3 style="margin-top:0;">Strategy signals</h3>
+                <p style="color:#8b949e; font-size:0.85rem; margin-top:-8px;">
+                    What the strategy is currently seeing per symbol — how close it is to a real
+                    crossover signal, not just the raw price.
+                </p>
+                <table>
+                    <tr><th>Symbol</th><th>Status</th><th class="num">Short MA / Long MA</th><th class="num">Crossover gap</th><th class="num">RSI</th></tr>
+                    {strategy_rows}
+                </table>
+            </div>
 
-    <div class="card">
-        <h3 style="margin-top:0;">Latest prices</h3>
-        <table><tr><th>Symbol</th><th>Last traded price</th></tr>{ltp_rows}</table>
-    </div>
+            <div class="card">
+                <h3 style="margin-top:0;">Open positions</h3>
+                <table><tr><th>Symbol</th><th class="num">Qty</th><th class="num">Entry price</th><th class="num">Current price</th><th class="num">Unrealized P&amp;L</th></tr>{position_rows}</table>
+            </div>
 
-    <div class="card">
-        <h3 style="margin-top:0;">Strategy signals</h3>
-        <p style="color:#8b949e; font-size:0.85rem; margin-top:-8px;">
-            What the strategy is currently seeing per symbol — how close it is to a real
-            crossover signal, not just the raw price.
-        </p>
-        <table>
-            <tr><th>Symbol</th><th>Status</th><th>Short MA / Long MA</th><th>Crossover gap</th><th>RSI</th></tr>
-            {strategy_rows}
-        </table>
-    </div>
+            <div class="card">
+                <h3 style="margin-top:0;">All orders</h3>
+                <div class="scroll-table">
+                    <table><tr><th>Time</th><th>Symbol</th><th>Segment</th><th>Side</th><th class="num">Qty</th><th>Status</th><th>Reason</th></tr>{order_rows}</table>
+                </div>
+            </div>
+        </div>
 
-    <div class="card">
-        <h3 style="margin-top:0;">Open positions</h3>
-        <table><tr><th>Symbol</th><th>Qty</th><th>Entry price</th><th>Current price</th><th>Unrealized P&amp;L</th></tr>{position_rows}</table>
-    </div>
+        <div class="col-side">
+            <div class="card">
+                <div class="stat-row">
+                    <div class="stat"><div class="label">Mode</div><div class="value">{status.get('mode', 'UNKNOWN')}</div></div>
+                    <div class="stat"><div class="label">Trades today</div><div class="value">{status.get('trades_today', 0)}</div></div>
+                </div>
+                <div class="stat" style="margin-top:10px;"><div class="label">Symbols watched</div><div class="value">{len(status.get('symbols', []))}</div></div>
+                {"<div class='stat' style='margin-top:10px;'><div class='label'>Halt reason</div><div class='value' style='color:#e74c3c; font-size:0.9rem;'>" + status.get('halt_reason','') + "</div></div>" if halted else ""}
+            </div>
 
-    <div class="card">
-        <h3 style="margin-top:0;">Performance</h3>
-        <div class="stat"><div class="label">Wins</div><div class="value" style="color:#2ecc71;">{win_count}</div></div>
-        <div class="stat"><div class="label">Losses</div><div class="value" style="color:#e74c3c;">{loss_count}</div></div>
-        <div class="stat"><div class="label">Win rate</div><div class="value">{win_rate_str}</div></div>
-    </div>
+            <div class="card">
+                <h3 style="margin-top:0;">Capital &amp; risk</h3>
+                <div style="display:flex; flex-direction:column; gap:10px;">
+                    <div style="display:flex; justify-content:space-between; border-bottom:1px solid #21262d; padding-bottom:8px;">
+                        <span class="dim" style="font-size:0.78rem;">Deployed capital</span>
+                        <span class="mono" style="font-weight:600;">₹{status.get('deployed_capital', 0):,.2f}</span>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; border-bottom:1px solid #21262d; padding-bottom:8px;">
+                        <span class="dim" style="font-size:0.78rem;">Total capital cap</span>
+                        <span class="mono" style="font-weight:600;">₹{status.get('total_capital_cap', 0):,.2f}</span>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; border-bottom:1px solid #21262d; padding-bottom:8px;">
+                        <span class="dim" style="font-size:0.78rem;">Realized P&amp;L today</span>
+                        <span class="mono" style="font-weight:600; color:{pnl_color};">₹{status.get('realized_pnl_today', 0):,.2f}</span>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; border-bottom:1px solid #21262d; padding-bottom:8px;">
+                        <span class="dim" style="font-size:0.78rem;">Daily loss limit</span>
+                        <span class="mono" style="font-weight:600;">₹{status.get('max_daily_loss', 0):,.2f}</span>
+                    </div>
+                    <div style="display:flex; justify-content:space-between;">
+                        <span class="dim" style="font-size:0.78rem;">F&amp;O trading</span>
+                        <span style="font-weight:600; color:{'#2ecc71' if status.get('allow_fno') else '#8b949e'};">{'Enabled' if status.get('allow_fno') else 'Disabled'}</span>
+                    </div>
+                </div>
+            </div>
 
-    <div class="card">
-        <h3 style="margin-top:0;">All orders</h3>
-        <table><tr><th>Time</th><th>Symbol</th><th>Segment</th><th>Side</th><th>Qty</th><th>Status</th><th>Reason</th></tr>{order_rows}</table>
+            <div class="card">
+                <h3 style="margin-top:0;">Performance</h3>
+                <div class="stat-row">
+                    <div class="stat"><div class="label">Wins</div><div class="value" style="color:#2ecc71;">{win_count}</div></div>
+                    <div class="stat"><div class="label">Losses</div><div class="value" style="color:#e74c3c;">{loss_count}</div></div>
+                    <div class="stat"><div class="label">Win rate</div><div class="value">{win_rate_str}</div></div>
+                </div>
+            </div>
+        </div>
     </div>
 </body>
 </html>
