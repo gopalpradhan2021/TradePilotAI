@@ -238,9 +238,10 @@ def _render(status: dict) -> str:
     clock_str = now_ist.strftime("%H:%M:%S")
 
     ltp_rows = "".join(
-        f"<tr><td>{sym}</td><td class='mono num'>{price if price is not None else '—'}</td></tr>"
+        f"<div class='ltp-row'><span>{sym}</span>"
+        f"<span class='mono num'>{price if price is not None else '—'}</span></div>"
         for sym, price in status.get("last_ltp", {}).items()
-    ) or "<tr><td colspan='2'>No symbols yet</td></tr>"
+    ) or "<div class='dim'>No symbols yet</div>"
 
     def _signal_status(d: dict) -> str:
         if not d.get("warmed_up"):
@@ -350,6 +351,10 @@ def _render(status: dict) -> str:
         .dashboard-grid {{ display: grid; grid-template-columns: 1fr 320px; gap: 20px;
                             margin-top: 18px; align-items: start; }}
         @media (max-width: 900px) {{ .dashboard-grid {{ grid-template-columns: 1fr; }} }}
+        .ltp-grid {{ display: grid; grid-template-columns: 1fr 1fr; column-gap: 24px; }}
+        @media (max-width: 480px) {{ .ltp-grid {{ grid-template-columns: 1fr; }} }}
+        .ltp-row {{ display: flex; justify-content: space-between; padding: 8px 0;
+                    border-bottom: 1px solid #21262d; font-size: 0.85rem; }}
         .market-bar {{ display: flex; align-items: center; gap: 10px; margin-top: 10px;
                        font-family: 'IBM Plex Mono', 'SF Mono', Consolas, monospace; font-size: 0.9rem; }}
         .mkt-dot {{ width: 8px; height: 8px; border-radius: 50%; display: inline-block; }}
@@ -435,31 +440,7 @@ def _render(status: dict) -> str:
         <div class="col-main">
             <div class="card">
                 <h3 style="margin-top:0;">Latest prices</h3>
-                <table><tr><th>Symbol</th><th class="num">Last traded price</th></tr>{ltp_rows}</table>
-            </div>
-
-            <div class="card">
-                <h3 style="margin-top:0;">Strategy signals</h3>
-                <p style="color:#8b949e; font-size:0.85rem; margin-top:-8px;">
-                    What the strategy is currently seeing per symbol — how close it is to a real
-                    crossover signal, not just the raw price.
-                </p>
-                <table>
-                    <tr><th>Symbol</th><th>Status</th><th class="num">Short MA / Long MA</th><th class="num">Crossover gap</th><th class="num">RSI</th></tr>
-                    {strategy_rows}
-                </table>
-            </div>
-
-            <div class="card">
-                <h3 style="margin-top:0;">Open positions</h3>
-                <table><tr><th>Symbol</th><th class="num">Qty</th><th class="num">Entry price</th><th class="num">Current price</th><th class="num">Unrealized P&amp;L</th></tr>{position_rows}</table>
-            </div>
-
-            <div class="card">
-                <h3 style="margin-top:0;">All orders</h3>
-                <div class="scroll-table">
-                    <table><tr><th>Time</th><th>Symbol</th><th>Segment</th><th>Side</th><th class="num">Qty</th><th>Status</th><th>Reason</th></tr>{order_rows}</table>
-                </div>
+                <div class="ltp-grid">{ltp_rows}</div>
             </div>
         </div>
 
@@ -507,6 +488,30 @@ def _render(status: dict) -> str:
                     <div class="stat"><div class="label">Win rate</div><div class="value">{win_rate_str}</div></div>
                 </div>
             </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h3 style="margin-top:0;">Strategy signals</h3>
+        <p style="color:#8b949e; font-size:0.85rem; margin-top:-8px;">
+            What the strategy is currently seeing per symbol — how close it is to a real
+            crossover signal, not just the raw price.
+        </p>
+        <table>
+            <tr><th>Symbol</th><th>Status</th><th class="num">Short MA / Long MA</th><th class="num">Crossover gap</th><th class="num">RSI</th></tr>
+            {strategy_rows}
+        </table>
+    </div>
+
+    <div class="card">
+        <h3 style="margin-top:0;">Open positions</h3>
+        <table><tr><th>Symbol</th><th class="num">Qty</th><th class="num">Entry price</th><th class="num">Current price</th><th class="num">Unrealized P&amp;L</th></tr>{position_rows}</table>
+    </div>
+
+    <div class="card">
+        <h3 style="margin-top:0;">All orders</h3>
+        <div class="scroll-table">
+            <table><tr><th>Time</th><th>Symbol</th><th>Segment</th><th>Side</th><th class="num">Qty</th><th>Status</th><th>Reason</th></tr>{order_rows}</table>
         </div>
     </div>
 </body>
