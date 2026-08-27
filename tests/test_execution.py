@@ -26,11 +26,13 @@ class FakeGrowwClient:
     def __init__(self, response=None, raise_exc=None,
                  quote_response=None, quote_raise_exc=None,
                  position_response=None, position_raise_exc=None,
-                 order_status_response=None, order_status_raise_exc=None):
+                 order_status_response=None, order_status_raise_exc=None,
+                 cancel_response=None, cancel_raise_exc=None):
         self.calls = []
         self.quote_calls = []
         self.position_calls = []
         self.order_status_calls = []
+        self.cancel_calls = []
         self._response = response if response is not None else {
             "groww_order_id": "ORD123", "order_status": "PENDING",
         }
@@ -41,6 +43,8 @@ class FakeGrowwClient:
         self._position_raise_exc = position_raise_exc
         self._order_status_response = order_status_response if order_status_response is not None else {}
         self._order_status_raise_exc = order_status_raise_exc
+        self._cancel_response = cancel_response if cancel_response is not None else {"order_status": "CANCELLED"}
+        self._cancel_raise_exc = cancel_raise_exc
 
     def place_order(self, **kwargs):
         self.calls.append(kwargs)
@@ -65,6 +69,12 @@ class FakeGrowwClient:
         if self._order_status_raise_exc is not None:
             raise self._order_status_raise_exc
         return self._order_status_response
+
+    def cancel_order(self, **kwargs):
+        self.cancel_calls.append(kwargs)
+        if self._cancel_raise_exc is not None:
+            raise self._cancel_raise_exc
+        return self._cancel_response
 
 
 def test_paper_broker_fills_at_ltp_when_no_limit_price():
@@ -318,4 +328,40 @@ def test_get_order_status_by_reference_reauths_on_auth_exception(monkeypatch):
     result = broker.get_order_status_by_reference("12345678")
 
     assert result == {"order_status": "REJECTED"}
+    assert broker.client is new_client
+
+
+# --- cancel_order (emergency cancel/flatten tools) -----------------------
+
+def test_cancel_order_returns_response():
+    client = FakeGrowwClient(cancel_response={"order_status": "CANCELLED"})
+    broker = LiveBroker(client)
+
+    result = broker.cancel_order("ORD123")
+
+    assert result == {"order_status": "CANCELLED"}
+    assert client.cancel_calls[0]["groww_order_id"] == "ORD123"
+    assert client.cancel_calls[0]["segment"] == client.SEGMENT_CASH
+
+
+def test_cancel_order_raises_on_generic_error():
+    client = FakeGrowwClient(cancel_raise_exc=RuntimeError("network down"))
+    broker = LiveBroker(client)
+
+    try:
+        broker.cancel_order("ORD123")
+        assert False, "expected BrokerPositionFetchError"
+    except BrokerPositionFetchError:
+        pass
+
+
+def test_cancel_order_reauths_on_auth_exception(monkeypatch):
+    failing_client = FakeGrowwClient(cancel_raise_exc=GrowwAPIAuthenticationException())
+    new_client = FakeGrowwClient(cancel_response={"order_status": "CANCELLED"})
+    monkeypatch.setattr(execution_module, "get_client", lambda: new_client)
+
+    broker = LiveBroker(failing_client)
+    result = broker.cancel_order("ORD123")
+
+    assert result == {"order_status": "CANCELLED"}
     assert broker.client is new_client

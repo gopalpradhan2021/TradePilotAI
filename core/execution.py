@@ -267,3 +267,31 @@ class LiveBroker(Broker):
             raise BrokerPositionFetchError(
                 f"Order status lookup failed for ref={order_reference_id}: {e}"
             ) from e
+
+    def cancel_order(self, broker_order_id: str, segment: Segment = Segment.CASH) -> dict:
+        """Used by scripts/cancel_order.py (operator-invoked, not called from the trading
+        loop). Raises on fetch/auth failure — same "never silently treat as success" contract
+        as get_broker_position/get_order_status_by_reference."""
+        def _call():
+            return self.client.cancel_order(
+                groww_order_id=broker_order_id,
+                segment=_groww_segment(self.client, segment),
+            )
+
+        try:
+            return _call()
+        except (GrowwAPIAuthenticationException, GrowwAPIAuthorisationException) as e:
+            logger.error("[LIVE] Cancel order auth error for id=%s: %s — attempting re-auth.",
+                         broker_order_id, e)
+            if not self._reauth():
+                raise BrokerPositionFetchError(
+                    f"Re-authentication failed cancelling order {broker_order_id}"
+                ) from e
+            try:
+                return _call()
+            except Exception as e2:
+                raise BrokerPositionFetchError(
+                    f"Cancel failed after re-auth retry for order {broker_order_id}: {e2}"
+                ) from e2
+        except Exception as e:
+            raise BrokerPositionFetchError(f"Cancel failed for order {broker_order_id}: {e}") from e
