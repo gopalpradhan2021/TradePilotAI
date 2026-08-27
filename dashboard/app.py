@@ -469,6 +469,15 @@ def _render(status: dict) -> str:
                 <h3 style="margin-top:0;">Latest prices</h3>
                 <div class="ltp-grid">{ltp_rows}</div>
             </div>
+
+            <div class="card">
+                <h3 style="margin-top:0;">Strategy signals</h3>
+                <p style="color:#8b949e; font-size:0.85rem; margin-top:-8px;">
+                    What the strategy is currently seeing per symbol — how close it is to a real
+                    crossover signal, not just the raw price.
+                </p>
+                <div class="sig-terminal mono">{strategy_rows}</div>
+            </div>
         </div>
 
         <div class="col-side">
@@ -516,15 +525,6 @@ def _render(status: dict) -> str:
                 </div>
             </div>
         </div>
-    </div>
-
-    <div class="card">
-        <h3 style="margin-top:0;">Strategy signals</h3>
-        <p style="color:#8b949e; font-size:0.85rem; margin-top:-8px;">
-            What the strategy is currently seeing per symbol — how close it is to a real
-            crossover signal, not just the raw price.
-        </p>
-        <div class="sig-terminal mono">{strategy_rows}</div>
     </div>
 
     <div class="card">
