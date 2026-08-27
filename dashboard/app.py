@@ -290,7 +290,7 @@ def _render(status: dict) -> str:
         else:
             rsi_cell = f"<span class='dim'>RSI {rsi:.1f} [{band[0]}-{band[1]}]</span>"
 
-        status_cell = "" if watching else f"<span style='color:{dot_color};'>{label}</span>"
+        status_cell = "<span></span>" if watching else f"<span style='color:{dot_color};'>{label}</span>"
         strategy_rows += (
             f"<div class='sig-row'><span class='{dot_class}' style='background:{dot_bg};'></span>"
             f"<span class='sig-symbol'>{sym}</span>{status_cell}"
@@ -380,8 +380,9 @@ def _render(status: dict) -> str:
         .ltp-row {{ display: flex; justify-content: space-between; padding: 8px 0;
                     border-bottom: 1px solid #21262d; font-size: 0.85rem; }}
         .sig-terminal {{ font-size: 0.8rem; }}
-        .sig-row {{ display: grid; grid-template-columns: 10px 110px 100px minmax(150px, 1fr) 215px 150px;
-                    gap: 14px; align-items: center; padding: 5px 8px; border-radius: 3px; }}
+        .sig-row {{ display: grid;
+                    grid-template-columns: 10px 100px 78px minmax(120px, 1fr) minmax(150px, 1.3fr) minmax(110px, 0.9fr);
+                    gap: 12px; align-items: center; padding: 5px 8px; border-radius: 3px; }}
         .sig-row > span {{ white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
         .sig-row:nth-child(odd) {{ background: rgba(255,255,255,0.03); }}
         .sig-dot {{ width: 6px; height: 6px; border-radius: 50%; display: inline-block; }}
