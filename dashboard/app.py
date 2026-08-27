@@ -242,6 +242,40 @@ def _render(status: dict) -> str:
         for sym, price in status.get("last_ltp", {}).items()
     ) or "<tr><td colspan='2'>No symbols yet</td></tr>"
 
+    def _signal_status(d: dict) -> str:
+        if not d.get("warmed_up"):
+            return f"Warming up ({d.get('prices_collected', 0)}/{d.get('prices_needed', '?')})"
+        if d.get("in_position"):
+            entry = d.get("entry_price")
+            return f"In position (entry ₹{entry:.2f})" if entry is not None else "In position"
+        cooldown = d.get("cooldown_remaining_sec")
+        if cooldown:
+            return f"Cooldown ({cooldown}s left)"
+        return "Watching for signal"
+
+    strategy_rows = ""
+    for sym, d in status.get("strategy_debug", {}).items():
+        if not d:
+            strategy_rows += f"<tr><td>{sym}</td><td colspan='4'>No data yet</td></tr>"
+            continue
+        gap_pct, min_gap = d.get("gap_pct"), d.get("min_gap_pct")
+        if gap_pct is None:
+            gap_cell = "—"
+        else:
+            gap_color = "#2ecc71" if gap_pct >= min_gap else "#8b949e"
+            gap_cell = f"<span style='color:{gap_color};'>{gap_pct:.4f}%</span> (need {min_gap:.4f}%)"
+        rsi, band = d.get("rsi"), d.get("rsi_entry_band")
+        rsi_cell = f"{rsi:.1f} (band {band[0]}-{band[1]})" if rsi is not None and band else "—"
+        ma_cell = (
+            f"{d['short_ma']:.2f} / {d['long_ma']:.2f}"
+            if d.get("short_ma") is not None and d.get("long_ma") is not None else "—"
+        )
+        strategy_rows += (
+            f"<tr><td>{sym}</td><td>{_signal_status(d)}</td>"
+            f"<td>{ma_cell}</td><td>{gap_cell}</td><td>{rsi_cell}</td></tr>"
+        )
+    strategy_rows = strategy_rows or "<tr><td colspan='5'>No symbols yet</td></tr>"
+
     order_rows = "".join(
         f"<tr><td>{o.get('created_at', '')[:19]}</td><td>{o.get('symbol')}</td>"
         f"<td>{o.get('segment', 'CASH')}</td>"
@@ -390,6 +424,18 @@ def _render(status: dict) -> str:
     </div>
 
     <div class="card">
+        <h3 style="margin-top:0;">Strategy signals</h3>
+        <p style="color:#8b949e; font-size:0.85rem; margin-top:-8px;">
+            What the strategy is currently seeing per symbol — how close it is to a real
+            crossover signal, not just the raw price.
+        </p>
+        <table>
+            <tr><th>Symbol</th><th>Status</th><th>Short MA / Long MA</th><th>Crossover gap</th><th>RSI</th></tr>
+            {strategy_rows}
+        </table>
+    </div>
+
+    <div class="card">
         <h3 style="margin-top:0;">Open positions</h3>
         <table><tr><th>Symbol</th><th>Qty</th><th>Entry price</th><th>Current price</th><th>Unrealized P&amp;L</th></tr>{position_rows}</table>
     </div>
@@ -445,6 +491,7 @@ def _build_status_view() -> dict:
     return {
         "updated_at": heartbeat.get("updated_at"),
         "mode": heartbeat.get("mode", "UNKNOWN"),
+        "strategy_debug": heartbeat.get("strategy_debug", {}),
         "bot_process_status": _bot_process_status(),
         "halted": bool(daily["halted"]),
         "halt_reason": daily["halt_reason"],

@@ -294,6 +294,75 @@ def test_overridden_stop_loss_pct_changes_exit_reason_threshold():
     assert strategy.params.stop_loss_pct != MARsiParams().stop_loss_pct
 
 
+# --- get_debug_info (dashboard "Strategy signals" card) -------------------
+
+def test_get_debug_info_before_any_price_shows_zero_progress():
+    strategy = MARsiStrategy()
+    info = strategy.get_debug_info("RELIANCE")
+
+    assert info["prices_collected"] == 0
+    assert info["warmed_up"] is False
+    assert info["short_ma"] is None
+    assert info["in_position"] is False
+
+
+def test_get_debug_info_while_warming_up_reports_progress():
+    strategy = MARsiStrategy()
+    strategy.decide("RELIANCE", 100.0)
+    strategy.decide("RELIANCE", 101.0)
+
+    info = strategy.get_debug_info("RELIANCE")
+
+    assert info["prices_collected"] == 2
+    assert info["warmed_up"] is False
+    assert info["prices_needed"] == max(mod.SHORT_WINDOW, mod.LONG_WINDOW, mod.RSI_WINDOW + 1)
+
+
+def test_get_debug_info_once_warmed_up_reports_real_indicator_values():
+    small = MARsiParams(short_window=2, long_window=3, rsi_window=2)
+    strategy = MARsiStrategy(params=small)
+    for price in [100.0, 101.0, 102.0]:
+        strategy.decide("RELIANCE", price)
+
+    info = strategy.get_debug_info("RELIANCE")
+
+    assert info["warmed_up"] is True
+    assert info["short_ma"] is not None
+    assert info["long_ma"] is not None
+    assert info["rsi"] is not None
+    assert info["gap_pct"] is not None
+
+
+def test_get_debug_info_reports_in_position_after_restore():
+    strategy = MARsiStrategy()
+    strategy.restore_position("RELIANCE", entry_price=150.0)
+
+    info = strategy.get_debug_info("RELIANCE")
+
+    assert info["in_position"] is True
+    assert info["entry_price"] == 150.0
+
+
+def test_get_debug_info_reports_cooldown_remaining(monkeypatch):
+    fake_clock = {"now": 0.0}
+    _patch_clock(monkeypatch, fake_clock)
+    strategy = MARsiStrategy()
+    _enter_position(strategy, monkeypatch, entry_price=100.0)
+    _patch_indicators(monkeypatch, short_ma=95, long_ma=100, rsi=60)
+    strategy.decide("RELIANCE", 99.0)  # exits, starts cooldown at t=0
+
+    fake_clock["now"] = 10.0  # 10s into a 60s cooldown
+    info = strategy.get_debug_info("RELIANCE")
+
+    assert info["in_position"] is False
+    assert info["cooldown_remaining_sec"] == mod.COOLDOWN_SECONDS - 10.0
+
+
+def test_get_debug_info_default_returns_empty_dict_for_base_strategy():
+    from strategies.base_strategy import NoOpStrategy
+    assert NoOpStrategy().get_debug_info("RELIANCE") == {}
+
+
 def test_restore_position_leaves_ma_history_at_defaults():
     strategy = MARsiStrategy()
     strategy.restore_position("RELIANCE", 150.0)

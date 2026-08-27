@@ -20,7 +20,8 @@ def _heartbeat_path() -> str:
 
 
 def write_heartbeat(*, mode: str, halted: bool, halt_reason: str,
-                     symbols: list[str], last_ltp: dict[str, float | None]) -> None:
+                     symbols: list[str], last_ltp: dict[str, float | None],
+                     strategy_debug: dict | None = None) -> None:
     path = _heartbeat_path()
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     payload = {
@@ -30,6 +31,7 @@ def write_heartbeat(*, mode: str, halted: bool, halt_reason: str,
         "halt_reason": halt_reason,
         "symbols": symbols,
         "last_ltp": last_ltp,
+        "strategy_debug": strategy_debug or {},
     }
     dir_name = os.path.dirname(path) or "."
     fd, tmp_path = tempfile.mkstemp(dir=dir_name)
@@ -53,6 +55,9 @@ def read_heartbeat() -> dict:
             "halt_reason": "",
             "symbols": [],
             "last_ltp": {},
+            "strategy_debug": {},
         }
     with open(path) as f:
-        return json.load(f)
+        payload = json.load(f)
+    payload.setdefault("strategy_debug", {})  # older heartbeat files predate this field
+    return payload

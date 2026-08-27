@@ -138,12 +138,14 @@ class Orchestrator:
 
     def _write_heartbeat(self, symbols: list[str]):
         try:
+            strategy_debug = {symbol: self.strategy.get_debug_info(symbol) for symbol in symbols}
             write_heartbeat(
                 mode=self.settings.mode,
                 halted=self.risk_manager.halted,
                 halt_reason=self.risk_manager.halt_reason,
                 symbols=symbols,
                 last_ltp=self._last_ltp,
+                strategy_debug=strategy_debug,
             )
         except Exception as e:
             logger.error("Failed to write heartbeat: %s", e)

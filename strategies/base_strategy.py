@@ -17,6 +17,14 @@ class BaseStrategy(ABC):
         cold after a restart. Default: no-op."""
         pass
 
+    def get_debug_info(self, symbol: str) -> dict:
+        """Optional: a snapshot of whatever internal state is useful to show an operator
+        (indicator values, how close to a signal, warmup progress) — purely observational,
+        never used by decide() itself. Orchestrator forwards this into the heartbeat file so
+        the dashboard can show it without any direct connection to the bot process. Default:
+        empty (nothing to show)."""
+        return {}
+
 
 class NoOpStrategy(BaseStrategy):
     def decide(self, symbol: str, last_traded_price: float | None) -> ProposedOrder | None:

@@ -117,6 +117,37 @@ class MARsiStrategy(BaseStrategy):
         state.entry_price = entry_price
         logger.info("%s: restored open position on startup, entry_price=%.2f", symbol, entry_price)
 
+    def get_debug_info(self, symbol: str) -> dict:
+        p = self.params
+        state = self._get_state(symbol)
+        prices = list(state.prices)
+
+        short_ma = _sma(prices, p.short_window)
+        long_ma = _sma(prices, p.long_window)
+        rsi = _rsi(prices, p.rsi_window)
+        gap_pct = abs(short_ma - long_ma) / long_ma * 100 if short_ma is not None and long_ma else None
+
+        cooldown_remaining_sec = None
+        if not state.in_position and state.last_exit_time is not None:
+            remaining = p.cooldown_seconds - (self._clock() - state.last_exit_time)
+            cooldown_remaining_sec = round(max(0.0, remaining), 1)
+
+        return {
+            "prices_collected": len(prices),
+            "prices_needed": max(p.short_window, p.long_window, p.rsi_window + 1),
+            "warmed_up": short_ma is not None and long_ma is not None and rsi is not None,
+            "short_ma": round(short_ma, 2) if short_ma is not None else None,
+            "long_ma": round(long_ma, 2) if long_ma is not None else None,
+            "gap_pct": round(gap_pct, 4) if gap_pct is not None else None,
+            "min_gap_pct": round(p.min_crossover_gap_pct * 100, 4),
+            "rsi": round(rsi, 1) if rsi is not None else None,
+            "rsi_entry_band": [p.rsi_entry_min, p.rsi_entry_max],
+            "rsi_exit_overbought": p.rsi_exit_overbought,
+            "in_position": state.in_position,
+            "entry_price": state.entry_price,
+            "cooldown_remaining_sec": cooldown_remaining_sec,
+        }
+
     def decide(self, symbol: str, last_traded_price: float | None) -> ProposedOrder | None:
         if last_traded_price is None:
             return None
