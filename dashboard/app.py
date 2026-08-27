@@ -243,39 +243,56 @@ def _render(status: dict) -> str:
         for sym, price in status.get("last_ltp", {}).items()
     ) or "<div class='dim'>No symbols yet</div>"
 
-    def _signal_status(d: dict) -> str:
+    def _signal_dot_and_label(d: dict) -> tuple[str, str]:
         if not d.get("warmed_up"):
-            return f"Warming up ({d.get('prices_collected', 0)}/{d.get('prices_needed', '?')})"
+            return "#58a6ff", "WARMUP"
         if d.get("in_position"):
-            entry = d.get("entry_price")
-            return f"In position (entry ₹{entry:.2f})" if entry is not None else "In position"
-        cooldown = d.get("cooldown_remaining_sec")
-        if cooldown:
-            return f"Cooldown ({cooldown}s left)"
-        return "Watching for signal"
+            return "#2ecc71", "IN POSITION"
+        if d.get("cooldown_remaining_sec"):
+            return "#d29922", "COOLDOWN"
+        return "#8b949e", "WATCHING"
 
     strategy_rows = ""
     for sym, d in status.get("strategy_debug", {}).items():
         if not d:
-            strategy_rows += f"<tr><td>{sym}</td><td colspan='4'>No data yet</td></tr>"
+            strategy_rows += (
+                f"<div class='sig-row'><span class='sig-dot' style='background:#8b949e;'></span>"
+                f"<span class='sig-symbol'>{sym}</span><span class='dim'>NO DATA</span>"
+                f"<span class='dim'>—</span><span></span><span></span></div>"
+            )
             continue
+        dot_color, label = _signal_dot_and_label(d)
+        if not d.get("warmed_up"):
+            detail = f"{d.get('prices_collected', 0)}/{d.get('prices_needed', '?')} bars collected"
+        elif d.get("in_position"):
+            entry = d.get("entry_price")
+            detail = f"entry ₹{entry:.2f}" if entry is not None else "—"
+        elif d.get("cooldown_remaining_sec"):
+            detail = f"{d['cooldown_remaining_sec']}s remaining"
+        elif d.get("short_ma") is not None and d.get("long_ma") is not None:
+            detail = f"MA {d['short_ma']:.2f}/{d['long_ma']:.2f}"
+        else:
+            detail = "—"
+
         gap_pct, min_gap = d.get("gap_pct"), d.get("min_gap_pct")
-        if gap_pct is None:
-            gap_cell = "—"
+        if gap_pct is None or label != "WATCHING":
+            gap_cell = ""
         else:
             gap_color = "#2ecc71" if gap_pct >= min_gap else "#d29922" if gap_pct >= min_gap * 0.5 else "#8b949e"
-            gap_cell = f"<span style='color:{gap_color};'>{gap_pct:.4f}%</span> <span class='dim'>(need {min_gap:.4f}%)</span>"
+            gap_cell = f"<span style='color:{gap_color};'>GAP {gap_pct:.4f}%</span> <span class='dim'>(need {min_gap:.4f}%)</span>"
+
         rsi, band = d.get("rsi"), d.get("rsi_entry_band")
-        rsi_cell = f"{rsi:.1f} <span class='dim'>(band {band[0]}-{band[1]})</span>" if rsi is not None and band else "—"
-        ma_cell = (
-            f"{d['short_ma']:.2f} / {d['long_ma']:.2f}"
-            if d.get("short_ma") is not None and d.get("long_ma") is not None else "—"
-        )
+        if rsi is None or band is None or label != "WATCHING":
+            rsi_cell = ""
+        else:
+            rsi_cell = f"<span class='dim'>RSI {rsi:.1f} [{band[0]}-{band[1]}]</span>"
+
         strategy_rows += (
-            f"<tr><td>{sym}</td><td>{_signal_status(d)}</td>"
-            f"<td class='mono num'>{ma_cell}</td><td class='mono num'>{gap_cell}</td><td class='mono num'>{rsi_cell}</td></tr>"
+            f"<div class='sig-row'><span class='sig-dot' style='background:{dot_color};'></span>"
+            f"<span class='sig-symbol'>{sym}</span><span style='color:{dot_color};'>{label}</span>"
+            f"<span class='dim'>{detail}</span><span>{gap_cell}</span><span>{rsi_cell}</span></div>"
         )
-    strategy_rows = strategy_rows or "<tr><td colspan='5'>No symbols yet</td></tr>"
+    strategy_rows = strategy_rows or "<div class='dim'>No symbols yet</div>"
 
     def _status_chip(order_status: str) -> str:
         fg, bg = {
@@ -355,6 +372,16 @@ def _render(status: dict) -> str:
         @media (max-width: 480px) {{ .ltp-grid {{ grid-template-columns: 1fr; }} }}
         .ltp-row {{ display: flex; justify-content: space-between; padding: 8px 0;
                     border-bottom: 1px solid #21262d; font-size: 0.85rem; }}
+        .sig-terminal {{ font-size: 0.8rem; }}
+        .sig-row {{ display: grid; grid-template-columns: 10px 110px 100px 1fr auto auto;
+                    gap: 14px; align-items: center; padding: 5px 8px; border-radius: 3px; }}
+        .sig-row:nth-child(odd) {{ background: rgba(255,255,255,0.03); }}
+        .sig-dot {{ width: 6px; height: 6px; border-radius: 50%; display: inline-block; }}
+        .sig-symbol {{ font-weight: 600; }}
+        @media (max-width: 700px) {{
+            .sig-row {{ grid-template-columns: 10px 90px 84px 1fr; }}
+            .sig-row span:nth-child(5), .sig-row span:nth-child(6) {{ display: none; }}
+        }}
         .market-bar {{ display: flex; align-items: center; gap: 10px; margin-top: 10px;
                        font-family: 'IBM Plex Mono', 'SF Mono', Consolas, monospace; font-size: 0.9rem; }}
         .mkt-dot {{ width: 8px; height: 8px; border-radius: 50%; display: inline-block; }}
@@ -497,10 +524,7 @@ def _render(status: dict) -> str:
             What the strategy is currently seeing per symbol — how close it is to a real
             crossover signal, not just the raw price.
         </p>
-        <table>
-            <tr><th>Symbol</th><th>Status</th><th class="num">Short MA / Long MA</th><th class="num">Crossover gap</th><th class="num">RSI</th></tr>
-            {strategy_rows}
-        </table>
+        <div class="sig-terminal mono">{strategy_rows}</div>
     </div>
 
     <div class="card">
