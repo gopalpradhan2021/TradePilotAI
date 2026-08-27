@@ -219,14 +219,14 @@ def _render(status: dict) -> str:
     pnl_color = "#e74c3c" if status.get("realized_pnl_today", 0) < 0 else "#2ecc71"
 
     if halted and halt_source == "MANUAL":
-        switch_button = '<button id="switch-btn" class="switch-btn resume" onclick="doStart()">Start</button>'
+        switch_button = '<button id="switch-btn" class="switch-btn resume" onclick="doStart()">Start Bot</button>'
     elif halted:
         switch_button = ('<button class="switch-btn resume" disabled '
                           'title="Automatic halts (daily loss limit, circuit breaker, '
                           'reconciliation mismatch) can only clear on the next trading day, '
-                          'not from here.">Start (auto halt)</button>')
+                          'not from here.">Start Bot (auto halt)</button>')
     else:
-        switch_button = '<button id="switch-btn" class="switch-btn halt" onclick="doStop()">Stop</button>'
+        switch_button = '<button id="switch-btn" class="switch-btn halt" onclick="doStop()">Stop Bot</button>'
 
     proc_status = status.get("bot_process_status", "unknown")
     proc_color = {"active": "#2ecc71", "inactive": "#8b949e", "failed": "#e74c3c"}.get(proc_status, "#8b949e")
@@ -385,19 +385,51 @@ def _render(status: dict) -> str:
             .sig-row {{ grid-template-columns: 10px 90px 84px 1fr; }}
             .sig-row span:nth-child(5), .sig-row span:nth-child(6) {{ display: none; }}
         }}
-        .market-bar {{ display: flex; align-items: center; gap: 10px; margin-top: 10px;
-                       font-family: 'IBM Plex Mono', 'SF Mono', Consolas, monospace; font-size: 0.9rem; }}
         .mkt-dot {{ width: 8px; height: 8px; border-radius: 50%; display: inline-block; }}
-        .mkt-state {{ font-weight: 700; letter-spacing: 0.5px; }}
-        .mkt-label {{ color: #8b949e; }}
-        .ist-clock {{ margin-left: auto; color: #58a6ff; font-weight: 600; }}
-        .switch-btn {{ margin-left: 16px; padding: 6px 16px; border-radius: 5px; border: none;
-                        font-weight: 600; cursor: pointer; font-size: 0.82rem; }}
+        .ist-clock {{ font-weight: 600; }}
+        .switch-btn {{ padding: 7px 18px; border-radius: 5px; border: none; font-weight: 700;
+                        cursor: pointer; font-size: 0.76rem; text-transform: uppercase;
+                        letter-spacing: 0.05em; }}
         .switch-btn.halt {{ background: #e74c3c; color: #fff; }}
         .switch-btn.resume {{ background: #2ecc71; color: #0d1117; }}
         .switch-btn:disabled {{ background: #30363d; color: #8b949e; cursor: not-allowed; }}
-        .proc-badge {{ margin-left: 8px; font-family: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+        .proc-badge {{ font-family: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
                         font-size: 0.78rem; }}
+
+        .topnav {{ display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
+                   padding: 14px 4px; border-bottom: 1px solid #21262d; }}
+        .topnav-left {{ display: flex; align-items: center; gap: 12px; }}
+        .topnav-title {{ font-size: 1.2rem; font-weight: 700; letter-spacing: -0.01em; }}
+        .topnav-links {{ display: flex; align-items: center; gap: 24px; }}
+        .topnav-link {{ color: #8b949e; font-size: 0.76rem; font-weight: 600; text-transform: uppercase;
+                         letter-spacing: 0.05em; text-decoration: none; padding-bottom: 4px;
+                         border-bottom: 2px solid transparent; }}
+        .topnav-link:hover {{ color: #e6edf3; }}
+        .topnav-link.active {{ color: #58a6ff; border-bottom-color: #58a6ff; }}
+        .topnav-right {{ display: flex; align-items: center; gap: 16px; justify-self: end; }}
+        .topnav-logout {{ color: #8b949e; font-size: 0.82rem; text-decoration: none; }}
+        .topnav-logout:hover {{ color: #e6edf3; }}
+        @media (max-width: 700px) {{
+            .topnav {{ grid-template-columns: 1fr; gap: 10px; justify-items: start; }}
+            .topnav-right {{ justify-self: start; }}
+        }}
+
+        .subbar {{ display: flex; justify-content: space-between; align-items: center;
+                   flex-wrap: wrap; gap: 10px 24px; padding: 10px 4px;
+                   border-bottom: 1px solid #21262d; font-size: 0.82rem; }}
+        .subbar-left, .subbar-right {{ display: flex; align-items: center; gap: 10px 22px;
+                                        flex-wrap: wrap; }}
+        .subbar-label {{ color: #7d8590; font-size: 0.7rem; text-transform: uppercase;
+                          letter-spacing: 0.05em; }}
+        .subbar-pill {{ display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px;
+                         border: 1px solid currentColor; border-radius: 999px; font-size: 0.72rem;
+                         font-weight: 700; letter-spacing: 0.03em;
+                         font-family: 'IBM Plex Mono', 'SF Mono', Consolas, monospace; }}
+        .subbar-clock {{ color: #58a6ff; font-family: 'IBM Plex Mono', 'SF Mono', Consolas, monospace; }}
+        .subbar-stat {{ display: flex; align-items: center; gap: 6px; }}
+        .subbar-value {{ font-weight: 600; }}
+        .halt-banner {{ background: rgba(231,76,60,0.12); border: 1px solid #e74c3c; color: #e74c3c;
+                         border-radius: 6px; padding: 8px 14px; font-size: 0.85rem; margin: 14px 0 0; }}
     </style>
     <script>
         function tickClock() {{
@@ -450,21 +482,40 @@ def _render(status: dict) -> str:
     </script>
 </head>
 <body>
-    <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
-        <h1>Groww Trading Agent</h1>
-        <span class="badge">{status_text}</span>{switch_button} {proc_badge}
-        <div style="margin-left:auto; display:flex; align-items:center; gap:16px; font-size:0.85rem;">
-            <a href="/backtest" style="color:#58a6ff;">Backtest &amp; market replay →</a>
-            <a href="/logout" style="color:#8b949e;">Log out</a>
+    <div class="topnav">
+        <div class="topnav-left">
+            <span class="topnav-title">TradePilotAI</span>
+            <span class="badge">{status_text}</span>
+        </div>
+        <nav class="topnav-links">
+            <a class="topnav-link active" href="/">Dashboard</a>
+            <a class="topnav-link" href="/backtest">Backtest</a>
+        </nav>
+        <div class="topnav-right">
+            {switch_button}
+            {proc_badge}
+            <a href="/logout" class="topnav-logout">Log out</a>
         </div>
     </div>
-    <div class="market-bar">
-        <span class="mkt-dot" style="background:{mkt_color};"></span>
-        <span class="mkt-state">NSE: {mkt_state}</span>
-        <span class="mkt-label">— {mkt_label}</span>
-        <span id="ist-clock" class="ist-clock">{clock_str} IST</span>
+    <div class="subbar">
+        <div class="subbar-left">
+            <span class="subbar-label">Market status:</span>
+            <span class="subbar-pill" style="color:{mkt_color};" title="{mkt_label}">
+                <span class="mkt-dot" style="background:{mkt_color};"></span>NSE {mkt_state}
+            </span>
+            <span id="ist-clock" class="subbar-clock">{clock_str} IST</span>
+        </div>
+        <div class="subbar-right">
+            <span class="subbar-stat"><span class="subbar-label">Mode:</span>
+                <span class="subbar-value">{status.get('mode', 'UNKNOWN')}</span></span>
+            <span class="subbar-stat"><span class="subbar-label">Trades today:</span>
+                <span class="subbar-value mono">{status.get('trades_today', 0)}</span></span>
+            <span class="subbar-stat"><span class="subbar-label">Symbols watched:</span>
+                <span class="subbar-value mono">{len(status.get('symbols', []))}</span></span>
+        </div>
     </div>
-    <p style="color:#8b949e; font-size:0.8rem; margin:6px 0 0;">Last updated: {updated} · auto-refreshes every 10s</p>
+    {"<div class='halt-banner'>Halt reason: " + status.get('halt_reason', '') + "</div>" if halted else ""}
+    <p style="color:#8b949e; font-size:0.8rem; margin:10px 0 0;">Last updated: {updated} · auto-refreshes every 10s</p>
 
     <div class="dashboard-grid">
         <div class="col-main">
@@ -491,15 +542,6 @@ def _render(status: dict) -> str:
         </div>
 
         <div class="col-side">
-            <div class="card">
-                <div class="stat-row">
-                    <div class="stat"><div class="label">Mode</div><div class="value">{status.get('mode', 'UNKNOWN')}</div></div>
-                    <div class="stat"><div class="label">Trades today</div><div class="value">{status.get('trades_today', 0)}</div></div>
-                </div>
-                <div class="stat" style="margin-top:10px;"><div class="label">Symbols watched</div><div class="value">{len(status.get('symbols', []))}</div></div>
-                {"<div class='stat' style='margin-top:10px;'><div class='label'>Halt reason</div><div class='value' style='color:#e74c3c; font-size:0.9rem;'>" + status.get('halt_reason','') + "</div></div>" if halted else ""}
-            </div>
-
             <div class="card">
                 <h3 style="margin-top:0;">Capital &amp; risk</h3>
                 <div style="display:flex; flex-direction:column; gap:10px;">
