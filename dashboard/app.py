@@ -262,6 +262,9 @@ def _render(status: dict) -> str:
             )
             continue
         dot_color, label = _signal_dot_and_label(d)
+        watching = label == "WATCHING"
+        dot_bg = "#2ecc71" if watching else "#8b949e"
+        dot_class = "sig-dot blink" if watching else "sig-dot"
         if not d.get("warmed_up"):
             detail = f"{d.get('prices_collected', 0)}/{d.get('prices_needed', '?')} bars collected"
         elif d.get("in_position"):
@@ -288,7 +291,7 @@ def _render(status: dict) -> str:
             rsi_cell = f"<span class='dim'>RSI {rsi:.1f} [{band[0]}-{band[1]}]</span>"
 
         strategy_rows += (
-            f"<div class='sig-row'><span class='sig-dot' style='background:{dot_color};'></span>"
+            f"<div class='sig-row'><span class='{dot_class}' style='background:{dot_bg};'></span>"
             f"<span class='sig-symbol'>{sym}</span><span style='color:{dot_color};'>{label}</span>"
             f"<span class='dim'>{detail}</span><span>{gap_cell}</span><span>{rsi_cell}</span></div>"
         )
@@ -380,6 +383,9 @@ def _render(status: dict) -> str:
                     gap: 14px; align-items: center; padding: 5px 8px; border-radius: 3px; }}
         .sig-row:nth-child(odd) {{ background: rgba(255,255,255,0.03); }}
         .sig-dot {{ width: 6px; height: 6px; border-radius: 50%; display: inline-block; }}
+        .sig-dot.blink {{ animation: sig-dot-pulse 1.4s ease-in-out infinite; }}
+        @keyframes sig-dot-pulse {{ 0%, 100% {{ opacity: 1; }} 50% {{ opacity: 0.25; }} }}
+        @media (prefers-reduced-motion: reduce) {{ .sig-dot.blink {{ animation: none; }} }}
         .sig-symbol {{ font-weight: 600; }}
         @media (max-width: 700px) {{
             .sig-row {{ grid-template-columns: 10px 90px 84px 1fr; }}
