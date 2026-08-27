@@ -379,8 +379,9 @@ def _render(status: dict) -> str:
         .ltp-row {{ display: flex; justify-content: space-between; padding: 8px 0;
                     border-bottom: 1px solid #21262d; font-size: 0.85rem; }}
         .sig-terminal {{ font-size: 0.8rem; }}
-        .sig-row {{ display: grid; grid-template-columns: 10px 110px 100px 1fr auto auto;
+        .sig-row {{ display: grid; grid-template-columns: 10px 110px 100px minmax(150px, 1fr) 215px 150px;
                     gap: 14px; align-items: center; padding: 5px 8px; border-radius: 3px; }}
+        .sig-row > span {{ white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
         .sig-row:nth-child(odd) {{ background: rgba(255,255,255,0.03); }}
         .sig-dot {{ width: 6px; height: 6px; border-radius: 50%; display: inline-block; }}
         .sig-dot.blink {{ animation: sig-dot-pulse 1.4s ease-in-out infinite; }}
