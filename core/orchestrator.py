@@ -10,9 +10,10 @@ import time
 from typing import Callable
 
 from config.settings import Settings
+from core.cost_model import calculate_order_charges
 from core.db import orders_repo, positions_repo, risk_repo
 from core.market_hours import is_market_open
-from core.models import ProposedOrder, Side
+from core.models import ProposedOrder, Segment, Side
 from core.notifier import send_notification
 from core.reconciliation import reconcile_positions
 from core.status_writer import write_heartbeat
@@ -262,6 +263,13 @@ class Orchestrator:
         result = self.broker.place_order(order, last_traded_price=ltp)
         logger.info("Execution result: %s", result)
         margin_used = check.margin_quote.required_margin if check.margin_quote else None
+        # Real transaction costs (core/cost_model.py) — CASH only, FNO has a different fee
+        # structure and isn't modeled. Computed once here and reused for both the order
+        # audit row and the position row below, so PAPER-mode P&L reflects what a real fill
+        # would actually cost, not just the raw price move.
+        charges = None
+        if result.status == "FILLED" and result.fill_price is not None and order.segment == Segment.CASH:
+            charges = calculate_order_charges(result.fill_price * order.qty, order.side)
         orders_repo.update_order_status(
             order_id,
             status=result.status,
@@ -269,6 +277,7 @@ class Orchestrator:
             fill_price=result.fill_price,
             message=result.message,
             margin_used=margin_used,
+            charges=charges,
         )
 
         if result.status == "FILLED" and result.fill_price is not None:
@@ -283,7 +292,7 @@ class Orchestrator:
                     symbol=order.symbol, qty=order.qty,
                     entry_price=result.fill_price, entry_order_id=order_id,
                     segment=order.segment.value, underlying_symbol=order.underlying_symbol,
-                    margin_used=margin_used,
+                    margin_used=margin_used, entry_charges=charges or 0.0,
                 )
                 self.risk_manager.record_fill(
                     side=order.side, order_value=order_value, pnl_delta=0.0, order_id=order_id
@@ -292,7 +301,8 @@ class Orchestrator:
                 open_pos = positions_repo.get_open_position(order.symbol)
                 if open_pos is not None:
                     pnl_delta = positions_repo.close_position(
-                        symbol=order.symbol, exit_price=result.fill_price, exit_order_id=order_id
+                        symbol=order.symbol, exit_price=result.fill_price, exit_order_id=order_id,
+                        exit_charges=charges or 0.0,
                     )
                 else:
                     pnl_delta = 0.0

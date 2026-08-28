@@ -17,39 +17,46 @@ def get_open_position(symbol: str) -> dict | None:
 
 def open_position(symbol: str, qty: int, entry_price: float, entry_order_id: int,
                    segment: str = "CASH", underlying_symbol: str | None = None,
-                   margin_used: float | None = None) -> int:
+                   margin_used: float | None = None, entry_charges: float = 0.0) -> int:
     with get_connection() as conn:
         cur = conn.execute(
             """
             INSERT INTO positions
                 (symbol, status, qty, entry_price, entry_order_id, opened_at,
-                 segment, underlying_symbol, margin_used)
-            VALUES (?, 'OPEN', ?, ?, ?, ?, ?, ?, ?)
+                 segment, underlying_symbol, margin_used, entry_charges)
+            VALUES (?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (symbol, qty, entry_price, entry_order_id, _now(),
-             segment, underlying_symbol, margin_used),
+             segment, underlying_symbol, margin_used, entry_charges),
         )
         conn.commit()
         return cur.lastrowid
 
 
-def close_position(symbol: str, exit_price: float, exit_order_id: int) -> float:
+def close_position(symbol: str, exit_price: float, exit_order_id: int,
+                    exit_charges: float = 0.0) -> float:
+    """realized_pnl is NET of both legs' transaction costs (entry_charges, stored at
+    open_position() time, plus exit_charges passed here) — not just the raw price
+    difference. See core/cost_model.py."""
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT id, qty, entry_price FROM positions WHERE symbol = ? AND status = 'OPEN'",
+            "SELECT id, qty, entry_price, entry_charges FROM positions "
+            "WHERE symbol = ? AND status = 'OPEN'",
             (symbol,),
         ).fetchone()
         if row is None:
             raise ValueError(f"No open position for {symbol} to close.")
 
-        realized_pnl = (exit_price - row["entry_price"]) * row["qty"]
+        gross_pnl = (exit_price - row["entry_price"]) * row["qty"]
+        realized_pnl = round(gross_pnl - row["entry_charges"] - exit_charges, 2)
         conn.execute(
             """
             UPDATE positions
-            SET status = 'CLOSED', exit_price = ?, exit_order_id = ?, realized_pnl = ?, closed_at = ?
+            SET status = 'CLOSED', exit_price = ?, exit_order_id = ?, realized_pnl = ?,
+                exit_charges = ?, closed_at = ?
             WHERE id = ?
             """,
-            (exit_price, exit_order_id, realized_pnl, _now(), row["id"]),
+            (exit_price, exit_order_id, realized_pnl, exit_charges, _now(), row["id"]),
         )
         conn.commit()
         return realized_pnl
@@ -75,7 +82,8 @@ def get_open_positions() -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT symbol, qty, entry_price, opened_at, segment, underlying_symbol, margin_used
+            SELECT symbol, qty, entry_price, opened_at, segment, underlying_symbol, margin_used,
+                   entry_charges
             FROM positions WHERE status = 'OPEN'
             """
         ).fetchall()
@@ -86,7 +94,8 @@ def get_closed_positions() -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute(
             """
-            SELECT symbol, qty, entry_price, exit_price, realized_pnl, opened_at, closed_at
+            SELECT symbol, qty, entry_price, exit_price, realized_pnl, opened_at, closed_at,
+                   entry_charges, exit_charges
             FROM positions WHERE status = 'CLOSED' ORDER BY closed_at ASC
             """
         ).fetchall()

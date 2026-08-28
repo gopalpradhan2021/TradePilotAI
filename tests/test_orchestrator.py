@@ -3,6 +3,7 @@ from datetime import date, datetime
 
 import core.orchestrator as orchestrator_module
 from config.settings import RiskConfig, Settings
+from core.cost_model import calculate_order_charges
 from core.db import orders_repo, positions_repo
 from core.execution import BrokerPositionFetchError, PaperBroker
 from core.models import OptionChainSnapshot, ProposedOrder, ExecutionResult, Segment, Side, OrderType
@@ -170,9 +171,32 @@ def test_sell_closes_position_and_records_pnl():
     strategy._queues["RELIANCE"] = [make_sell_order()]
     orchestrator.run_once(symbols=["RELIANCE"])  # closes position at 110
 
+    # realized_pnl is net of real transaction costs (core/cost_model.py), not just the raw
+    # (110 - 100) * 1 price move — compute the expected net value the same way production does.
+    entry_charges = calculate_order_charges(100.0, Side.BUY)
+    exit_charges = calculate_order_charges(110.0, Side.SELL)
+    expected_net_pnl = round((110.0 - 100.0) * 1 - entry_charges - exit_charges, 2)
+
     assert positions_repo.get_open_position("RELIANCE") is None
-    assert risk_manager._realized_pnl_today == 10.0  # (110 - 100) * 1
+    assert risk_manager._realized_pnl_today == expected_net_pnl
     assert risk_manager._trades_today == 2
+
+
+def test_cash_order_charges_are_persisted_on_order_and_position():
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=100.0)
+    strategy = ScriptedStrategy({"RELIANCE": [make_buy_order()]})
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+
+    orchestrator.run_once(symbols=["RELIANCE"])
+
+    expected_charges = calculate_order_charges(100.0, Side.BUY)
+    orders = orders_repo.get_recent_orders(10)
+    assert orders[0]["charges"] == expected_charges
+
+    position = positions_repo.get_open_position("RELIANCE")
+    assert position["entry_charges"] == expected_charges
 
 
 def test_duplicate_idempotency_key_is_blocked_without_double_processing():
@@ -657,6 +681,24 @@ def test_fno_buy_order_flows_through_the_same_risk_and_execution_pipeline_as_cas
     assert position is not None
     assert position["segment"] == "FNO"
     assert position["entry_price"] == 200.0
+
+
+def test_fno_order_has_no_charges_computed():
+    # core/cost_model.py is CASH-only — FNO has a materially different fee structure and
+    # isn't modeled, so an FNO order's `charges` column stays None, not 0.0.
+    settings = make_settings(allow_fno=True, allow_fno_index=True)
+    risk_manager = RiskManager(settings.risk, mode="PAPER")
+    broker = FixedPriceBroker(price=200.0)
+    fno_strategy = ScriptedFnoStrategy({"NIFTY": [make_fno_order()]})
+    chain = make_chain(strikes=[make_matching_strike(ltp=200.0)])
+    fno_market_data = StubFnoMarketData({"NIFTY": chain})
+    orchestrator = Orchestrator(settings, broker, risk_manager, ScriptedStrategy({}),
+                                 fno_strategy=fno_strategy, fno_market_data=fno_market_data)
+
+    orchestrator.run_once_fno(["NIFTY"])
+
+    orders = orders_repo.get_recent_orders(10)
+    assert orders[0]["charges"] is None
 
 
 def test_fno_order_rejected_by_risk_manager_does_not_open_a_position():

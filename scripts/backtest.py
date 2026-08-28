@@ -24,8 +24,12 @@ Known limitations (v1):
   - Multi-symbol runs use the first symbol's candle timeline to drive the
     simulated clock (day rollover, cooldown); only sensible when all
     symbols share the same session/timeframe.
-  - No slippage, spread, brokerage, or partial fills — same simplified fill
-    model PaperBroker already uses live (fill at that bar's close).
+  - No slippage, spread, or partial fills — same simplified fill model
+    PaperBroker already uses live (fill at that bar's close). Real CASH
+    transaction costs (brokerage, STT, exchange/SEBI charges, stamp duty,
+    GST) ARE modeled (core/cost_model.py) and netted into realized_pnl,
+    since Orchestrator._handle_proposed_order() is the same unmodified code
+    path backtest and live/paper both run through.
 
 Usage:
     python -m scripts.backtest --symbols RELIANCE --start 2026-06-01 --end 2026-08-01 --interval 5minute

@@ -68,6 +68,43 @@ def test_close_position_with_no_open_position_raises():
         positions_repo.close_position(symbol="GHOST", exit_price=1.0, exit_order_id=1)
 
 
+# --- transaction cost model (entry_charges / exit_charges / net realized_pnl) --------
+
+def test_open_position_stores_entry_charges():
+    oid = orders_repo.insert_order(make_order(), status="FILLED", reference_price=100.0)
+    positions_repo.open_position(symbol="RELIANCE", qty=1, entry_price=100.0,
+                                  entry_order_id=oid, entry_charges=1.23)
+
+    position = positions_repo.get_open_position("RELIANCE")
+    assert position["entry_charges"] == 1.23
+
+
+def test_open_position_defaults_entry_charges_to_zero():
+    oid = orders_repo.insert_order(make_order(), status="FILLED", reference_price=100.0)
+    positions_repo.open_position(symbol="RELIANCE", qty=1, entry_price=100.0, entry_order_id=oid)
+
+    position = positions_repo.get_open_position("RELIANCE")
+    assert position["entry_charges"] == 0.0
+
+
+def test_close_position_deducts_entry_and_exit_charges_from_realized_pnl():
+    oid1 = orders_repo.insert_order(make_order(), status="FILLED", reference_price=100.0)
+    positions_repo.open_position(symbol="RELIANCE", qty=1, entry_price=100.0,
+                                  entry_order_id=oid1, entry_charges=1.0)
+
+    oid2 = orders_repo.insert_order(make_order(side=Side.SELL), status="FILLED", reference_price=110.0)
+    pnl = positions_repo.close_position(symbol="RELIANCE", exit_price=110.0,
+                                         exit_order_id=oid2, exit_charges=1.5)
+
+    # gross (110 - 100) * 1 = 10.0, minus entry_charges(1.0) and exit_charges(1.5)
+    assert pnl == 7.5
+
+    closed = positions_repo.get_closed_positions()
+    assert closed[0]["entry_charges"] == 1.0
+    assert closed[0]["exit_charges"] == 1.5
+    assert closed[0]["realized_pnl"] == 7.5
+
+
 def test_win_loss_counts():
     for symbol, entry, exit_price in [("A", 100, 110), ("B", 100, 90), ("C", 100, 105)]:
         oid1 = orders_repo.insert_order(make_order(symbol=symbol), status="FILLED", reference_price=entry)
@@ -101,6 +138,16 @@ def test_update_order_status_stores_margin_used():
     with get_connection() as conn:
         row = conn.execute("SELECT margin_used FROM orders WHERE id = ?", (oid,)).fetchone()
     assert row["margin_used"] == 470.32
+
+
+def test_update_order_status_stores_charges():
+    order = make_order()
+    oid = orders_repo.insert_order(order, status="PROPOSED", reference_price=100.0)
+    orders_repo.update_order_status(oid, status="FILLED", fill_price=100.0, charges=0.1246)
+
+    with get_connection() as conn:
+        row = conn.execute("SELECT charges FROM orders WHERE id = ?", (oid,)).fetchone()
+    assert row["charges"] == 0.1246
 
 
 def test_open_position_stores_segment_underlying_and_margin_used():

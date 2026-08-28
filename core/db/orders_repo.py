@@ -45,25 +45,26 @@ def insert_order(order: ProposedOrder, status: str, reference_price: float | Non
 
 def update_order_status(order_id: int, *, status: str, broker_order_id: str | None = None,
                          fill_price: float | None = None, message: str = "",
-                         margin_used: float | None = None) -> None:
+                         margin_used: float | None = None, charges: float | None = None) -> None:
     with get_connection() as conn:
         conn.execute(
             """
             UPDATE orders
             SET status = ?, broker_order_id = COALESCE(?, broker_order_id),
                 fill_price = COALESCE(?, fill_price), margin_used = COALESCE(?, margin_used),
+                charges = COALESCE(?, charges),
                 message = ?, updated_at = ?
             WHERE id = ?
             """,
-            (status, broker_order_id, fill_price, margin_used, message, _now(), order_id),
+            (status, broker_order_id, fill_price, margin_used, charges, message, _now(), order_id),
         )
         conn.commit()
 
 
 def get_recent_orders(limit: int | None = 20) -> list[dict]:
     query = """
-        SELECT symbol, side, qty, segment, underlying_symbol, status, fill_price, reason,
-               message, created_at
+        SELECT symbol, side, qty, segment, underlying_symbol, status, fill_price, charges,
+               reason, message, created_at
         FROM orders ORDER BY created_at DESC, id DESC
     """
     params: tuple = ()
