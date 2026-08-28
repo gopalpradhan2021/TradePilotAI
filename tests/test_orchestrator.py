@@ -71,7 +71,7 @@ class ReconcilingBroker(FixedPriceBroker):
         self._raise_for = raise_for or set()
         self.position_calls = []
 
-    def get_broker_position(self, symbol):
+    def get_broker_position(self, symbol, segment=None):
         self.position_calls.append(symbol)
         if symbol in self._raise_for:
             raise BrokerPositionFetchError(f"fetch failed for {symbol}")

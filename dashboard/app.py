@@ -298,6 +298,62 @@ def _render(status: dict) -> str:
         )
     strategy_rows = strategy_rows or "<div class='dim'>No symbols yet</div>"
 
+    def _fno_signal_dot_and_label(d: dict) -> tuple[str, str]:
+        if not d.get("warmed_up"):
+            return "#58a6ff", "WARMUP"
+        if d.get("in_position"):
+            return "#2ecc71", "IN POSITION"
+        return "#8b949e", "WATCHING"
+
+    fno_rows = ""
+    for underlying, d in status.get("fno_strategy_debug", {}).items():
+        if not d:
+            fno_rows += (
+                f"<div class='sig-row'><span class='sig-dot' style='background:#8b949e;'></span>"
+                f"<span class='sig-symbol'>{underlying}</span><span class='dim'>NO DATA</span>"
+                f"<span class='dim'>—</span><span></span><span></span></div>"
+            )
+            continue
+        dot_color, label = _fno_signal_dot_and_label(d)
+        watching = label == "WATCHING"
+        dot_bg = "#2ecc71" if watching else "#8b949e"
+        dot_class = "sig-dot blink" if watching else "sig-dot"
+        if not d.get("warmed_up"):
+            detail = f"{d.get('iv_history_collected', 0)}/{d.get('iv_history_needed', '?')} IV readings collected"
+        elif d.get("in_position"):
+            entry, held = d.get("entry_price"), d.get("held_trading_symbol") or "—"
+            detail = f"{held} @ ₹{entry:.2f}" if entry is not None else held
+        else:
+            detail = "—"
+
+        current_iv, iv_ceiling = d.get("current_atm_iv"), d.get("atm_iv_ceiling")
+        if current_iv is None or iv_ceiling is None or label != "WATCHING":
+            iv_cell = ""
+        else:
+            iv_color = "#2ecc71" if current_iv < iv_ceiling else "#d29922"
+            iv_cell = (f"<span style='color:{iv_color};'>IV {current_iv:.2f}</span> "
+                       f"<span class='dim'>(ceiling {iv_ceiling:.2f})</span>")
+
+        status_cell = "<span></span>" if watching else f"<span style='color:{dot_color};'>{label}</span>"
+        fno_rows += (
+            f"<div class='sig-row'><span class='{dot_class}' style='background:{dot_bg};'></span>"
+            f"<span class='sig-symbol'>{underlying}</span>{status_cell}"
+            f"<span class='dim'>{detail}</span><span>{iv_cell}</span><span></span></div>"
+        )
+    fno_rows = fno_rows or "<div class='dim'>No F&amp;O underlyings yet</div>"
+
+    fno_underlyings = status.get("fno_underlyings") or []
+    fno_signals_card = "" if not fno_underlyings else f"""
+    <div class="card">
+        <h3 style="margin-top:0;">F&amp;O signals</h3>
+        <p style="color:#8b949e; font-size:0.85rem; margin-top:-8px;">
+            What the index-options (IV/OI/Greeks) strategy is seeing per underlying —
+            separate from the CASH crossover strategy above.
+        </p>
+        <div class="sig-terminal mono">{fno_rows}</div>
+    </div>
+    """
+
     def _status_chip(order_status: str) -> str:
         fg, bg = {
             "FILLED": ("#2ecc71", "rgba(46,204,113,0.15)"),
@@ -536,7 +592,7 @@ def _render(status: dict) -> str:
                 </p>
                 <div class="sig-terminal mono">{strategy_rows}</div>
             </div>
-
+            {fno_signals_card}
             <div class="card">
                 <h3 style="margin-top:0;">Open positions</h3>
                 <table><tr><th>Symbol</th><th class="num">Qty</th><th class="num">Entry price</th><th class="num">Current price</th><th class="num">Unrealized P&amp;L</th></tr>{position_rows}</table>
@@ -633,6 +689,8 @@ def _build_status_view() -> dict:
         "updated_at": heartbeat.get("updated_at"),
         "mode": heartbeat.get("mode", "UNKNOWN"),
         "strategy_debug": heartbeat.get("strategy_debug", {}),
+        "fno_underlyings": heartbeat.get("fno_underlyings", []),
+        "fno_strategy_debug": heartbeat.get("fno_strategy_debug", {}),
         "bot_process_status": _bot_process_status(),
         "halted": bool(daily["halted"]),
         "halt_reason": daily["halt_reason"],

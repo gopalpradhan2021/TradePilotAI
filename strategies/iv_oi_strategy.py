@@ -134,6 +134,8 @@ class IvOiStrategy(BaseStrategy):
 
     def get_debug_info(self, symbol: str) -> dict:
         state = self._get_state(symbol)
+        current_iv = state.atm_iv_history[-1] if state.atm_iv_history else None
+        iv_ceiling = max(state.atm_iv_history) if state.atm_iv_history else None
         return {
             "warmed_up": len(state.atm_iv_history) >= self.params.iv_history_len,
             "iv_history_collected": len(state.atm_iv_history),
@@ -143,6 +145,10 @@ class IvOiStrategy(BaseStrategy):
             "held_strike": state.held_strike,
             "entry_price": state.entry_price,
             "entry_iv": state.entry_iv,
+            # Live context for the WATCHING state — "how close" the underlying is to an
+            # entry-worthy setup, mirroring MARsiStrategy's GAP/RSI transparency.
+            "current_atm_iv": round(current_iv, 2) if current_iv is not None else None,
+            "atm_iv_ceiling": round(iv_ceiling, 2) if iv_ceiling is not None else None,
         }
 
     def decide_fno(self, underlying: str, chain: OptionChainSnapshot) -> ProposedOrder | None:

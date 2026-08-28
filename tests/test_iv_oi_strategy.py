@@ -43,6 +43,15 @@ def test_no_signal_while_warming_up_iv_history():
     debug = strategy.get_debug_info("NIFTY")
     assert debug["warmed_up"] is False
     assert debug["iv_history_collected"] == 1
+    assert debug["current_atm_iv"] == 20.0
+    assert debug["atm_iv_ceiling"] == 20.0
+
+
+def test_get_debug_info_before_any_chain_shows_no_iv_context():
+    strategy = IvOiStrategy(params=make_params(), lot_size_fn=fixed_lot_size_fn())
+    debug = strategy.get_debug_info("NIFTY")
+    assert debug["current_atm_iv"] is None
+    assert debug["atm_iv_ceiling"] is None
 
 
 def _warm_up(strategy, chain_builder, cycles=3):
