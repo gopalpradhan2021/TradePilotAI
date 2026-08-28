@@ -24,7 +24,7 @@ def make_settings(mode="PAPER", **risk_overrides):
         fno_paper_validated=False,
     )
     defaults.update(risk_overrides)
-    return Settings(mode=mode, risk=RiskConfig(**defaults), ntfy_topic="")
+    return Settings(mode=mode, risk=RiskConfig(**defaults), ntfy_topic="", candle_interval="5minute")
 
 
 class ScriptedStrategy(BaseStrategy):
@@ -81,6 +81,36 @@ class ReconcilingBroker(FixedPriceBroker):
 class FailingStrategy(BaseStrategy):
     def decide(self, symbol, last_traded_price):
         raise RuntimeError("strategy blew up")
+
+
+class CandleAwareStrategy(BaseStrategy):
+    """Declares candle requirements and records what update_candles() was called with —
+    for testing Orchestrator._maybe_update_candles()'s cadence/wiring in isolation from any
+    real indicator math."""
+
+    def __init__(self, interval="5minute", lookback=40):
+        self._req = (interval, lookback)
+        self.update_calls = []
+
+    def decide(self, symbol, last_traded_price):
+        return None
+
+    def get_candle_requirements(self):
+        return self._req
+
+    def update_candles(self, symbol, candles):
+        self.update_calls.append((symbol, candles))
+
+
+class CandleBroker(FixedPriceBroker):
+    def __init__(self, price, candles_by_symbol=None):
+        super().__init__(price)
+        self._candles = candles_by_symbol or {}
+        self.candle_calls = []
+
+    def get_recent_candles(self, symbol, interval, lookback_bars):
+        self.candle_calls.append((symbol, interval, lookback_bars))
+        return self._candles.get(symbol)
 
 
 def make_buy_order(symbol="RELIANCE", qty=1):
@@ -719,3 +749,104 @@ def test_fno_cycle_fires_again_after_interval_elapses():
     orchestrator.run_once(symbols=[], fno_underlyings=["NIFTY"])
 
     assert len(fno_market_data.calls) == 1
+
+
+# --- candle-fetch cadence (candle-based MA/RSI redesign) -------------------
+
+def test_candle_update_does_not_fire_immediately_after_construction():
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    strategy = CandleAwareStrategy()
+    broker = CandleBroker(price=100.0, candles_by_symbol={"RELIANCE": [{"close": 100.0}]})
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+
+    orchestrator.run_once(symbols=["RELIANCE"])
+
+    assert broker.candle_calls == []
+    assert strategy.update_calls == []
+
+
+def test_candle_update_gated_to_at_most_once_per_interval():
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    strategy = CandleAwareStrategy()
+    broker = CandleBroker(price=100.0, candles_by_symbol={"RELIANCE": [{"close": 100.0}]})
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+    orchestrator._last_candle_fetch_time = time.monotonic() - 9999
+
+    orchestrator.run_once(symbols=["RELIANCE"])
+    orchestrator.run_once(symbols=["RELIANCE"])
+    orchestrator.run_once(symbols=["RELIANCE"])
+
+    assert len(broker.candle_calls) == 1  # only the first call actually fetched candles
+
+
+def test_candle_update_fires_again_after_interval_elapses():
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    strategy = CandleAwareStrategy()
+    broker = CandleBroker(price=100.0, candles_by_symbol={"RELIANCE": [{"close": 100.0}]})
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+    orchestrator._last_candle_fetch_time = time.monotonic() - 9999
+
+    orchestrator.run_once(symbols=["RELIANCE"])
+
+    assert len(broker.candle_calls) == 1
+
+
+def test_candle_update_is_a_noop_when_strategy_has_no_candle_requirements():
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    strategy = ScriptedStrategy({"RELIANCE": [None]})  # get_candle_requirements() -> None
+    broker = CandleBroker(price=100.0, candles_by_symbol={"RELIANCE": [{"close": 100.0}]})
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+    orchestrator._last_candle_fetch_time = time.monotonic() - 9999
+
+    orchestrator.run_once(symbols=["RELIANCE"])
+
+    assert broker.candle_calls == []
+
+
+def test_candle_update_calls_strategy_update_candles_with_fetched_data():
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    strategy = CandleAwareStrategy(interval="15minute", lookback=30)
+    candles = [{"close": 100.0}, {"close": 101.0}]
+    broker = CandleBroker(price=100.0, candles_by_symbol={"RELIANCE": candles})
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+    orchestrator._last_candle_fetch_time = time.monotonic() - 9999
+
+    orchestrator.run_once(symbols=["RELIANCE"])
+
+    assert broker.candle_calls == [("RELIANCE", "15minute", 30)]
+    assert strategy.update_calls == [("RELIANCE", candles)]
+
+
+def test_candle_update_skips_symbol_on_fetch_none_without_crashing():
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    strategy = CandleAwareStrategy()
+    broker = CandleBroker(price=100.0, candles_by_symbol={})  # get_recent_candles() -> None
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+    orchestrator._last_candle_fetch_time = time.monotonic() - 9999
+
+    orchestrator.run_once(symbols=["RELIANCE"])  # must not raise
+
+    assert strategy.update_calls == []  # skipped, not called with None
+
+
+def test_candle_update_uses_injected_clock_not_real_time():
+    fake_clock = {"now": 1000.0}
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    strategy = CandleAwareStrategy()
+    broker = CandleBroker(price=100.0, candles_by_symbol={"RELIANCE": [{"close": 100.0}]})
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy,
+                                 clock=lambda: fake_clock["now"])
+
+    orchestrator.run_once(symbols=["RELIANCE"])  # construction-time clock value, no fire
+    assert broker.candle_calls == []
+
+    fake_clock["now"] += 61  # past _CANDLE_FETCH_INTERVAL_SEC (60), by the injected clock only
+    orchestrator.run_once(symbols=["RELIANCE"])
+    assert len(broker.candle_calls) == 1

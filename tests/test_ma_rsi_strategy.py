@@ -263,28 +263,29 @@ def test_default_params_match_module_constants():
         rsi_entry_max=mod.RSI_ENTRY_MAX, rsi_exit_overbought=mod.RSI_EXIT_OVERBOUGHT,
         stop_loss_pct=mod.STOP_LOSS_PCT, min_crossover_gap_pct=mod.MIN_CROSSOVER_GAP_PCT,
         cooldown_seconds=mod.COOLDOWN_SECONDS,
+        candle_interval=mod.CANDLE_INTERVAL, candle_lookback_bars=mod.CANDLE_LOOKBACK_BARS,
     )
 
 
 def test_overridden_params_change_warmup_length():
-    """A smaller long_window should let the strategy fully warm up on far fewer prices than
+    """A smaller long_window should let the strategy fully warm up on far fewer candles than
     the production default (21) requires — proves decide() is actually reading self.params
     for its indicator windows, not the module constants."""
-    prices = [100.0, 101.0, 99.0, 102.0]
+    candles = [{"close": p} for p in [100.0, 101.0, 99.0, 102.0]]
 
     short_params = MARsiParams(short_window=2, long_window=3, rsi_window=2)
     short_strategy = MARsiStrategy(params=short_params)
-    for price in prices:
-        short_strategy.decide("RELIANCE", price)
+    short_strategy.update_candles("RELIANCE", candles)
+    short_strategy.decide("RELIANCE", candles[-1]["close"])
     short_state = short_strategy._get_state("RELIANCE")
     assert short_state.prev_short_ma is not None
     assert short_state.prev_long_ma is not None
 
     default_strategy = MARsiStrategy()  # long_window=21 by default
-    for price in prices:
-        default_strategy.decide("RELIANCE", price)
+    default_strategy.update_candles("RELIANCE", candles)
+    default_strategy.decide("RELIANCE", candles[-1]["close"])
     default_state = default_strategy._get_state("RELIANCE")
-    assert default_state.prev_long_ma is None  # still warming up with only 4 prices
+    assert default_state.prev_long_ma is None  # still warming up with only 4 candles
 
 
 def test_overridden_stop_loss_pct_changes_exit_reason_threshold():
@@ -308,8 +309,7 @@ def test_get_debug_info_before_any_price_shows_zero_progress():
 
 def test_get_debug_info_while_warming_up_reports_progress():
     strategy = MARsiStrategy()
-    strategy.decide("RELIANCE", 100.0)
-    strategy.decide("RELIANCE", 101.0)
+    strategy.update_candles("RELIANCE", [{"close": 100.0}, {"close": 101.0}])
 
     info = strategy.get_debug_info("RELIANCE")
 
@@ -321,8 +321,7 @@ def test_get_debug_info_while_warming_up_reports_progress():
 def test_get_debug_info_once_warmed_up_reports_real_indicator_values():
     small = MARsiParams(short_window=2, long_window=3, rsi_window=2)
     strategy = MARsiStrategy(params=small)
-    for price in [100.0, 101.0, 102.0]:
-        strategy.decide("RELIANCE", price)
+    strategy.update_candles("RELIANCE", [{"close": p} for p in [100.0, 101.0, 102.0]])
 
     info = strategy.get_debug_info("RELIANCE")
 
@@ -371,3 +370,59 @@ def test_restore_position_leaves_ma_history_at_defaults():
     assert state.prev_short_ma is None
     assert state.prev_long_ma is None
     assert state.last_exit_time is None
+
+
+# --- update_candles / get_candle_requirements (candle-based signal redesign) ---
+
+def test_update_candles_replaces_not_appends():
+    strategy = MARsiStrategy()
+    strategy.update_candles("RELIANCE", [{"close": 100.0}, {"close": 101.0}])
+    strategy.update_candles("RELIANCE", [{"close": 200.0}])
+
+    state = strategy._get_state("RELIANCE")
+    assert list(state.prices) == [200.0]
+
+
+def test_update_candles_empty_list_is_a_noop():
+    strategy = MARsiStrategy()
+    strategy.update_candles("RELIANCE", [{"close": 100.0}, {"close": 101.0}])
+    strategy.update_candles("RELIANCE", [])
+
+    state = strategy._get_state("RELIANCE")
+    assert list(state.prices) == [100.0, 101.0]
+
+
+def test_decide_no_longer_mutates_prices():
+    strategy = MARsiStrategy()
+    strategy.decide("RELIANCE", 100.0)
+    strategy.decide("RELIANCE", 101.0)
+    strategy.decide("RELIANCE", 102.0)
+
+    state = strategy._get_state("RELIANCE")
+    assert len(state.prices) == 0
+
+
+def test_decide_stop_loss_independent_of_candle_series(monkeypatch):
+    """Stop-loss must fire from last_traded_price alone — proven here by triggering it
+    without ever calling update_candles(), so no candle-derived series feeds it at all."""
+    strategy = MARsiStrategy()
+    _enter_position(strategy, monkeypatch, entry_price=100.0)
+
+    _patch_indicators(monkeypatch, short_ma=120, long_ma=100, rsi=50)
+    order = strategy.decide("RELIANCE", 97.5)  # <= 100 * 0.98
+
+    assert order is not None
+    assert order.side == Side.SELL
+    assert "Stop-loss hit" in order.reason
+    assert len(strategy._get_state("RELIANCE").prices) == 0  # candle series never populated
+
+
+def test_get_candle_requirements_returns_params_interval_and_lookback():
+    params = MARsiParams(candle_interval="15minute", candle_lookback_bars=40)
+    strategy = MARsiStrategy(params=params)
+    assert strategy.get_candle_requirements() == ("15minute", 40)
+
+
+def test_get_candle_requirements_default_base_strategy_returns_none():
+    from strategies.base_strategy import NoOpStrategy
+    assert NoOpStrategy().get_candle_requirements() is None

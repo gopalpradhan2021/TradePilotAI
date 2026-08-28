@@ -1,10 +1,10 @@
-from datetime import date
+from datetime import date, datetime
 
 import core.execution as execution_module
 from core.auth import GrowwAuthError
 from core.execution import (
     PaperBroker, LiveBroker, BrokerPositionFetchError, _build_trading_symbol,
-    _derive_order_reference_id,
+    _derive_order_reference_id, _parse_candles,
 )
 from core.models import ProposedOrder, Side, OrderType, Segment, OptionType
 from growwapi.groww.exceptions import GrowwAPIAuthenticationException
@@ -36,7 +36,8 @@ class FakeGrowwClient:
                  option_chain_response=None, option_chain_raise_exc=None,
                  order_margin_response=None, order_margin_raise_exc=None,
                  available_margin_response=None, available_margin_raise_exc=None,
-                 instrument_response=None, instrument_raise_exc=None):
+                 instrument_response=None, instrument_raise_exc=None,
+                 candles_response=None, candles_raise_exc=None):
         self.calls = []
         self.quote_calls = []
         self.position_calls = []
@@ -47,6 +48,7 @@ class FakeGrowwClient:
         self.instrument_calls = []
         self.order_margin_calls = []
         self.available_margin_calls = []
+        self.candles_calls = []
         self._response = response if response is not None else {
             "groww_order_id": "ORD123", "order_status": "PENDING",
         }
@@ -81,6 +83,8 @@ class FakeGrowwClient:
             "lot_size": "75",
         }
         self._instrument_raise_exc = instrument_raise_exc
+        self._candles_response = candles_response if candles_response is not None else {"candles": []}
+        self._candles_raise_exc = candles_raise_exc
 
     def place_order(self, **kwargs):
         self.calls.append(kwargs)
@@ -141,6 +145,12 @@ class FakeGrowwClient:
         if self._instrument_raise_exc is not None:
             raise self._instrument_raise_exc
         return self._instrument_response
+
+    def get_historical_candles(self, **kwargs):
+        self.candles_calls.append(kwargs)
+        if self._candles_raise_exc is not None:
+            raise self._candles_raise_exc
+        return self._candles_response
 
 
 def test_paper_broker_fills_at_ltp_when_no_limit_price():
@@ -560,3 +570,117 @@ def test_live_broker_get_lot_size_returns_none_on_fetch_error():
     client = FakeGrowwClient(instrument_raise_exc=RuntimeError("network down"))
     broker = LiveBroker(client)
     assert broker.get_lot_size("NIFTY2690122000CE") is None
+
+
+# --- get_recent_candles (candle-based MA/RSI redesign) --------------------
+
+class _FixedNow(datetime):
+    """Subclasses the real datetime so fromisoformat() still returns usable instances,
+    but pins utcnow() to a known value — lets tests deterministically control which
+    candles _drop_unclosed_trailing_candle() considers closed vs. still-forming."""
+    @classmethod
+    def utcnow(cls):
+        return datetime(2026, 8, 28, 10, 30, 0)
+
+
+_REALISTIC_CANDLES_RESPONSE = {
+    "candles": [
+        ["2026-08-28T10:10:00", 100.0, 101.0, 99.5, 100.5, 1000],
+        ["2026-08-28T10:15:00", 100.5, 102.0, 100.0, 101.5, 1200],
+        ["2026-08-28T10:20:00", 101.5, 101.8, 100.8, 101.0, 900],
+    ]
+}
+
+
+def test_parse_candles_skips_rows_with_none_close():
+    raw = {"candles": [
+        ["2026-08-28T10:10:00", 100.0, 101.0, 99.5, 100.5, 1000],
+        ["2026-08-28T10:15:00", None, None, None, None, None],
+    ]}
+    candles = _parse_candles(raw)
+    assert len(candles) == 1
+    assert candles[0]["close"] == 100.5
+
+
+def test_paper_broker_get_recent_candles_parses_response(monkeypatch):
+    monkeypatch.setattr(execution_module, "datetime", _FixedNow)
+    client = FakeGrowwClient(candles_response=_REALISTIC_CANDLES_RESPONSE)
+    broker = PaperBroker(market_data_client=client)
+
+    candles = broker.get_recent_candles("RELIANCE", interval="5minute", lookback_bars=10)
+
+    assert candles is not None
+    assert [c["close"] for c in candles] == [100.5, 101.5, 101.0]
+    assert candles[0]["timestamp"] == datetime(2026, 8, 28, 10, 10, 0)
+    assert client.candles_calls[0]["groww_symbol"] == "NSE-RELIANCE"
+    assert client.candles_calls[0]["candle_interval"] == "5minute"
+
+
+def test_paper_broker_get_recent_candles_without_client_returns_none():
+    broker = PaperBroker(market_data_client=None)
+    assert broker.get_recent_candles("RELIANCE", interval="5minute", lookback_bars=10) is None
+
+
+def test_paper_broker_get_recent_candles_returns_none_on_fetch_error():
+    client = FakeGrowwClient(candles_raise_exc=RuntimeError("network down"))
+    broker = PaperBroker(market_data_client=client)
+    assert broker.get_recent_candles("RELIANCE", interval="5minute", lookback_bars=10) is None
+
+
+def test_paper_broker_get_recent_candles_slices_to_lookback_bars(monkeypatch):
+    monkeypatch.setattr(execution_module, "datetime", _FixedNow)
+    client = FakeGrowwClient(candles_response=_REALISTIC_CANDLES_RESPONSE)
+    broker = PaperBroker(market_data_client=client)
+
+    candles = broker.get_recent_candles("RELIANCE", interval="5minute", lookback_bars=2)
+
+    assert [c["close"] for c in candles] == [101.5, 101.0]  # last 2 only
+
+
+def test_paper_broker_get_recent_candles_drops_still_forming_trailing_candle(monkeypatch):
+    monkeypatch.setattr(execution_module, "datetime", _FixedNow)
+    # Last candle at 10:28 + 5min width = 10:33, which is after the fixed "now" (10:30) —
+    # still forming, must be dropped.
+    response = {"candles": [
+        ["2026-08-28T10:10:00", 100.0, 101.0, 99.5, 100.5, 1000],
+        ["2026-08-28T10:28:00", 100.5, 102.0, 100.0, 101.5, 1200],
+    ]}
+    client = FakeGrowwClient(candles_response=response)
+    broker = PaperBroker(market_data_client=client)
+
+    candles = broker.get_recent_candles("RELIANCE", interval="5minute", lookback_bars=10)
+
+    assert len(candles) == 1
+    assert candles[0]["close"] == 100.5
+
+
+def test_paper_broker_get_recent_candles_keeps_closed_trailing_candle(monkeypatch):
+    monkeypatch.setattr(execution_module, "datetime", _FixedNow)
+    # Last candle at 10:20 + 5min width = 10:25, before the fixed "now" (10:30) — closed,
+    # must be kept.
+    client = FakeGrowwClient(candles_response=_REALISTIC_CANDLES_RESPONSE)
+    broker = PaperBroker(market_data_client=client)
+
+    candles = broker.get_recent_candles("RELIANCE", interval="5minute", lookback_bars=10)
+
+    assert len(candles) == 3
+
+
+def test_live_broker_get_recent_candles_reauths_on_auth_exception(monkeypatch):
+    monkeypatch.setattr(execution_module, "datetime", _FixedNow)
+    failing_client = FakeGrowwClient(candles_raise_exc=GrowwAPIAuthenticationException())
+    new_client = FakeGrowwClient(candles_response=_REALISTIC_CANDLES_RESPONSE)
+    monkeypatch.setattr(execution_module, "get_client", lambda: new_client)
+
+    broker = LiveBroker(failing_client)
+    candles = broker.get_recent_candles("RELIANCE", interval="5minute", lookback_bars=10)
+
+    assert candles is not None
+    assert len(candles) == 3
+    assert broker.client is new_client
+
+
+def test_live_broker_get_recent_candles_returns_none_on_fetch_error():
+    client = FakeGrowwClient(candles_raise_exc=RuntimeError("network down"))
+    broker = LiveBroker(client)
+    assert broker.get_recent_candles("RELIANCE", interval="5minute", lookback_bars=10) is None

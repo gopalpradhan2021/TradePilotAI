@@ -50,3 +50,30 @@ class ReplayMarketDataClient:
 
     def bars_consumed(self, symbol: str) -> int:
         return self._index.get(symbol, 0)
+
+    def get_historical_candles(self, exchange, segment, groww_symbol, start_time, end_time,
+                                candle_interval):
+        """Shim for PaperBroker.get_recent_candles() during backtest/replay. Ignores every
+        kwarg except which symbol (groww_symbol is "NSE-<symbol>", matching how
+        PaperBroker.get_recent_candles() and scripts/backtest.py both construct it) — serves
+        only candles ALREADY CONSUMED via get_quote() so far (self._index[symbol] candles),
+        i.e. strictly no lookahead into the bar about to be served this cycle or beyond. This
+        deliberately mirrors live behavior, where a periodic candle-fetch only ever sees
+        already-closed candles while the live LTP ticks inside the next forming bar.
+
+        Returns the same raw {"candles": [[iso_ts, o, h, l, c, v], ...]} shape Groww's real API
+        returns, so PaperBroker's own _parse_candles() path is exercised identically in both
+        backtest and live/paper. Candle dicts here only guarantee "timestamp"/"close" (see this
+        class's own docstring and callers like tests/test_backtest_engine.py's candle
+        fixtures) — falls back to `close` for missing open/high/low, 0 for missing volume."""
+        symbol = groww_symbol.removeprefix("NSE-")
+        candles = self._candles.get(symbol, [])
+        idx = self._index.get(symbol, 0)
+        served = candles[:idx]
+        return {
+            "candles": [
+                [c["timestamp"].isoformat(), c.get("open", c["close"]), c.get("high", c["close"]),
+                 c.get("low", c["close"]), c["close"], c.get("volume", 0)]
+                for c in served
+            ]
+        }

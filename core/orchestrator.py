@@ -7,6 +7,7 @@ own, only the current-cycle LTP cache needed for the heartbeat file.
 """
 import logging
 import time
+from typing import Callable
 
 from config.settings import Settings
 from core.db import orders_repo, positions_repo, risk_repo
@@ -40,25 +41,40 @@ class Orchestrator:
     # CASH poll interval, similar in spirit to _RECONCILE_INTERVAL_SEC.
     _FNO_POLL_INTERVAL_SEC = 30
 
+    # Candle fetches (broker.get_recent_candles()) are heavier than a single LTP call, and
+    # MA/RSI trend signals don't need per-tick (5s) granularity — that granularity is exactly
+    # what caused the noise problem candles replace. Coarser than _FNO_POLL_INTERVAL_SEC since
+    # even the shortest supported candle interval (1minute) is still much wider than 30s.
+    _CANDLE_FETCH_INTERVAL_SEC = 60
+
     def __init__(self, settings: Settings, broker, risk_manager, strategy,
-                 fno_strategy=None, fno_market_data=None):
+                 fno_strategy=None, fno_market_data=None,
+                 clock: Callable[[], float] | None = None):
         """fno_strategy/fno_market_data are both optional and None by default — an
         Orchestrator built without them (every existing CASH-only caller) never touches
         the FNO code path at all; run_once_fno()/_maybe_run_fno_cycle() no-op immediately
-        if fno_strategy is None."""
+        if fno_strategy is None.
+
+        clock defaults to the real monotonic clock (resolved at construction time, matching
+        MARsiStrategy's own clock param) — core/backtest_engine.py injects a simulated one
+        derived from replayed candle timestamps, so periodic cadences (reconciliation, FNO
+        cycle, candle fetch) advance with simulated bar time instead of real wall-clock time
+        during a backtest run."""
         self.settings = settings
         self.broker = broker
         self.risk_manager = risk_manager
         self.strategy = strategy
         self.fno_strategy = fno_strategy
         self.fno_market_data = fno_market_data
+        self._clock = clock if clock is not None else time.monotonic
         self._last_ltp: dict[str, float | None] = {}
         self._consecutive_failures = 0
         # Starts the clock at construction rather than None/0, so the first periodic check
         # doesn't fire immediately after startup — main.py already does a startup-time
         # reconciliation before the orchestrator loop even begins.
-        self._last_reconcile_time = time.monotonic()
-        self._last_fno_cycle_time = time.monotonic()
+        self._last_reconcile_time = self._clock()
+        self._last_fno_cycle_time = self._clock()
+        self._last_candle_fetch_time = self._clock()
         # {symbol: (last_seen_price, monotonic_time_that_price_was_first_seen)} — tracks how
         # long each symbol's LTP has gone UNCHANGED, not just how long since the last fetch,
         # since a degraded feed returning the same cached value on every successful call is a
@@ -81,7 +97,7 @@ class Orchestrator:
         instead of only ever being caught on the next restart."""
         if self.settings.mode != "LIVE":
             return
-        now = time.monotonic()
+        now = self._clock()
         if now - self._last_reconcile_time < self._RECONCILE_INTERVAL_SEC:
             return
         self._last_reconcile_time = now
@@ -92,11 +108,32 @@ class Orchestrator:
         configured — a no-op for every existing CASH-only Orchestrator."""
         if self.fno_strategy is None or not fno_underlyings:
             return
-        now = time.monotonic()
+        now = self._clock()
         if now - self._last_fno_cycle_time < self._FNO_POLL_INTERVAL_SEC:
             return
         self._last_fno_cycle_time = now
         self.run_once_fno(fno_underlyings)
+
+    def _maybe_update_candles(self, symbols: list[str]):
+        """At most once per _CANDLE_FETCH_INTERVAL_SEC. No-op if self.strategy doesn't
+        declare candle requirements (get_candle_requirements() returns None, the default) —
+        every CASH strategy other than MARsiStrategy is unaffected. A per-symbol fetch
+        failure (get_recent_candles() returns None) just skips that symbol this cycle; the
+        strategy keeps trading off whatever candle series it already has."""
+        requirements = self.strategy.get_candle_requirements()
+        if requirements is None:
+            return
+        interval, lookback_bars = requirements
+        now = self._clock()
+        if now - self._last_candle_fetch_time < self._CANDLE_FETCH_INTERVAL_SEC:
+            return
+        self._last_candle_fetch_time = now
+        for symbol in symbols:
+            candles = self.broker.get_recent_candles(symbol, interval=interval, lookback_bars=lookback_bars)
+            if candles is None:
+                logger.warning("%s: candle fetch failed this cycle — keeping existing series.", symbol)
+                continue
+            self.strategy.update_candles(symbol, candles)
 
     def run_once_fno(self, underlyings: list[str]):
         for underlying in underlyings:
@@ -163,6 +200,8 @@ class Orchestrator:
                             self.risk_manager.halt_reason)
             self._write_heartbeat(symbols, fno_underlyings)
             return
+
+        self._maybe_update_candles(symbols)
 
         for symbol in symbols:
             ltp = self.broker.get_ltp(symbol)

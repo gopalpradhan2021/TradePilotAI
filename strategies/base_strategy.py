@@ -21,6 +21,17 @@ class BaseStrategy(ABC):
         keeps this exactly as broker-agnostic as decide() already is."""
         return None
 
+    def get_candle_requirements(self) -> tuple[str, int] | None:
+        """Optional: (candle_interval, lookback_bars) this strategy needs Orchestrator to
+        fetch via broker.get_recent_candles() and hand to update_candles(). Default: None —
+        this strategy computes off decide()'s last_traded_price only."""
+        return None
+
+    def update_candles(self, symbol: str, candles: list[dict]) -> None:
+        """Optional: REPLACES (not appends) this symbol's candle series — called by
+        Orchestrator on the candle-fetch cadence, not every decide() cycle. Default: no-op."""
+        pass
+
     def restore_position(self, symbol: str, entry_price: float) -> None:
         """Optional: called once per symbol at startup if positions_repo shows an
         already-open position, so the strategy resumes tracking it instead of starting

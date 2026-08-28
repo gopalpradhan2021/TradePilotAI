@@ -27,7 +27,7 @@ from core.reconciliation import reconcile_positions
 from core.risk_manager import RiskManager
 from core.orchestrator import Orchestrator
 from strategies.iv_oi_strategy import IvOiStrategy
-from strategies.ma_rsi_strategy import MARsiStrategy
+from strategies.ma_rsi_strategy import MARsiParams, MARsiStrategy
 
 
 def setup_logging():
@@ -124,7 +124,7 @@ def main():
     else:
         broker = PaperBroker(market_data_client=groww_client)
 
-    strategy = MARsiStrategy()
+    strategy = MARsiStrategy(params=MARsiParams(candle_interval=settings.candle_interval))
 
     for symbol in args.symbols:
         open_pos = positions_repo.get_open_position(symbol)

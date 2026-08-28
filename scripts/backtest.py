@@ -37,7 +37,6 @@ import os
 import shutil
 import sys
 import tempfile
-from datetime import datetime
 
 
 def _parse_args():
@@ -59,6 +58,8 @@ def _normalize_dt(value: str) -> str:
 
 def fetch_candles(client, symbol: str, start_time: str, end_time: str, interval: str) -> list[dict]:
     """Shared by this CLI and scripts/nightly_optimize.py."""
+    from core.execution import _parse_candles
+
     response = client.get_historical_candles(
         exchange=client.EXCHANGE_NSE,
         segment=client.SEGMENT_CASH,
@@ -67,14 +68,7 @@ def fetch_candles(client, symbol: str, start_time: str, end_time: str, interval:
         end_time=end_time,
         candle_interval=interval,
     )
-    candles = [
-        {"timestamp": datetime.fromisoformat(row[0]), "open": row[1], "high": row[2],
-         "low": row[3], "close": row[4], "volume": row[5]}
-        for row in response.get("candles", [])
-        if row[4] is not None
-    ]
-    candles.sort(key=lambda c: c["timestamp"])
-    return candles
+    return _parse_candles(response)
 
 
 def main():

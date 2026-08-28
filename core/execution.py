@@ -9,7 +9,7 @@ import logging
 import os
 import uuid
 from abc import ABC, abstractmethod
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from growwapi.groww.exceptions import GrowwAPIAuthenticationException, GrowwAPIAuthorisationException
 
@@ -125,6 +125,61 @@ def _parse_option_chain(underlying: str, expiry_date: date, raw: dict) -> Option
     )
 
 
+_INTERVAL_TIMEDELTAS: dict[str, timedelta] = {
+    "1minute": timedelta(minutes=1),
+    "3minute": timedelta(minutes=3),
+    "5minute": timedelta(minutes=5),
+    "10minute": timedelta(minutes=10),
+    "15minute": timedelta(minutes=15),
+    "30minute": timedelta(minutes=30),
+    "1hour": timedelta(hours=1),
+    "4hour": timedelta(hours=4),
+    "1day": timedelta(days=1),
+}
+
+
+def _parse_candles(raw: dict) -> list[dict]:
+    """Converts Groww's get_historical_candles() response shape — {"candles":
+    [[iso_timestamp, open, high, low, close, volume], ...]} — into a list of dicts, ascending
+    by timestamp. Shared by PaperBroker/LiveBroker.get_recent_candles() and
+    scripts/backtest.py's fetch_candles(), so both use identical parsing."""
+    candles = [
+        {"timestamp": datetime.fromisoformat(row[0]), "open": row[1], "high": row[2],
+         "low": row[3], "close": row[4], "volume": row[5]}
+        for row in raw.get("candles", [])
+        if row[4] is not None
+    ]
+    candles.sort(key=lambda c: c["timestamp"])
+    return candles
+
+
+def _drop_unclosed_trailing_candle(candles: list[dict], interval: str, now: datetime) -> list[dict]:
+    """Drops the last candle if it hasn't actually closed yet — a still-forming bar's close
+    keeps changing on every refetch, which would reintroduce the same tick-noise problem real
+    candles are meant to fix. Compares against real wall-clock `now`, never a simulated clock:
+    whether a candle has closed is a fact about the real world, independent of any
+    orchestrator/backtest clock — which is also what keeps this a no-op during backtest replay,
+    since historical candle timestamps are always far in the past relative to real "now"."""
+    if not candles:
+        return candles
+    width = _INTERVAL_TIMEDELTAS.get(interval)
+    if width is None:
+        logger.warning("Unknown candle interval %r — skipping unclosed-candle filter.", interval)
+        return candles
+    if candles[-1]["timestamp"] + width > now:
+        return candles[:-1]
+    return candles
+
+
+def _candle_fetch_window(now: datetime) -> tuple[str, str]:
+    """Fixed 7-day lookback regardless of lookback_bars/interval — comfortably covers
+    weekends/holidays for any reasonable lookback_bars default while staying well under
+    Groww's ~30-day cap for intraday intervals. Callers slice down to the actual
+    lookback_bars afterward."""
+    start = now - timedelta(days=7)
+    return start.strftime("%Y-%m-%d %H:%M:%S"), now.strftime("%Y-%m-%d %H:%M:%S")
+
+
 class Broker(ABC):
     @abstractmethod
     def place_order(self, order: ProposedOrder, last_traded_price: float | None) -> ExecutionResult:
@@ -152,6 +207,15 @@ class Broker(ABC):
         assumed 75) and is NOT derivable from get_option_chain()'s response. Never hardcode
         a lot size; always fetch it here before sizing an FNO order. Returns None on any
         fetch failure, same contract as get_expiries/get_option_chain/get_ltp."""
+        ...
+
+    @abstractmethod
+    def get_recent_candles(self, symbol: str, interval: str, lookback_bars: int) -> list[dict] | None:
+        """Up to `lookback_bars` most-recent CLOSED candles for `symbol` (CASH only), oldest
+        first, each {"timestamp": datetime, "open": float, "high": float, "low": float,
+        "close": float, "volume": float} — same shape scripts/backtest.py's candle fetch
+        already produces. Returns None on any fetch failure, same contract as
+        get_expiries/get_option_chain/get_ltp."""
         ...
 
 
@@ -210,6 +274,24 @@ class PaperBroker(Broker):
             return int(inst["lot_size"])
         except Exception as e:
             logger.error("Paper broker lot size fetch failed for %s: %s", trading_symbol, e)
+            return None
+
+    def get_recent_candles(self, symbol: str, interval: str, lookback_bars: int) -> list[dict] | None:
+        if self._market_data_client is None:
+            return None
+        try:
+            now = datetime.utcnow()
+            start_time, end_time = _candle_fetch_window(now)
+            raw = self._market_data_client.get_historical_candles(
+                exchange=self._market_data_client.EXCHANGE_NSE,
+                segment=self._market_data_client.SEGMENT_CASH,
+                groww_symbol=f"NSE-{symbol}", start_time=start_time, end_time=end_time,
+                candle_interval=interval,
+            )
+            candles = _drop_unclosed_trailing_candle(_parse_candles(raw), interval, now)
+            return candles[-lookback_bars:] if candles else candles
+        except Exception as e:
+            logger.error("Paper broker candle fetch failed for %s (%s): %s", symbol, interval, e)
             return None
 
     def place_order(self, order: ProposedOrder, last_traded_price: float | None) -> ExecutionResult:
@@ -349,6 +431,37 @@ class LiveBroker(Broker):
         except (KeyError, TypeError, ValueError) as e:
             logger.error("Lot size fetch for %s returned unexpected shape: %s", trading_symbol, e)
             return None
+
+    def get_recent_candles(self, symbol: str, interval: str, lookback_bars: int) -> list[dict] | None:
+        now = datetime.utcnow()
+        start_time, end_time = _candle_fetch_window(now)
+
+        def _call():
+            return self.client.get_historical_candles(
+                exchange=self.client.EXCHANGE_NSE, segment=self.client.SEGMENT_CASH,
+                groww_symbol=f"NSE-{symbol}", start_time=start_time, end_time=end_time,
+                candle_interval=interval,
+            )
+
+        try:
+            raw = _call()
+        except (GrowwAPIAuthenticationException, GrowwAPIAuthorisationException) as e:
+            logger.error("Candle fetch auth error for %s (%s): %s — attempting re-auth.",
+                         symbol, interval, e)
+            if not self._reauth():
+                return None
+            try:
+                raw = _call()
+            except Exception as e2:
+                logger.error("Candle fetch FAILED after re-auth retry for %s (%s): %s",
+                             symbol, interval, e2)
+                return None
+        except Exception as e:
+            logger.error("Candle fetch failed for %s (%s): %s", symbol, interval, e)
+            return None
+
+        candles = _drop_unclosed_trailing_candle(_parse_candles(raw), interval, now)
+        return candles[-lookback_bars:] if candles else candles
 
     def get_broker_position(self, symbol: str, segment: Segment = Segment.CASH) -> dict:
         """Returns {"symbol": symbol, "qty": <int>} — qty=0 means broker confirms flat.

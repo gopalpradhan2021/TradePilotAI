@@ -30,6 +30,9 @@ class Settings:
     mode: str
     risk: RiskConfig
     ntfy_topic: str
+    # Candle interval MARsiStrategy computes MA/RSI from (see strategies/ma_rsi_strategy.py's
+    # CANDLE_INTERVAL comment) — not a risk gate, so it lives here rather than on RiskConfig.
+    candle_interval: str
 
 
 def _float_env(key: str, default: float) -> float:
@@ -58,4 +61,5 @@ def load_settings() -> Settings:
         mode=os.getenv("MODE", "PAPER").upper(),
         risk=risk,
         ntfy_topic=os.getenv("NTFY_TOPIC", ""),
+        candle_interval=os.getenv("CANDLE_INTERVAL", "5minute").strip(),
     )

@@ -50,7 +50,7 @@ def run_backtest(candles_by_symbol: dict[str, list[dict]], symbols: list[str],
     broker = PaperBroker(market_data_client=replay_client)
     risk_manager = RiskManager(settings.risk, ntfy_topic="", today_fn=sim_clock.today)
     strategy = MARsiStrategy(clock=sim_clock.monotonic, params=strategy_params)
-    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy, clock=sim_clock.monotonic)
 
     bars = 0
     while any(replay_client.has_more(s) for s in symbols):
@@ -63,7 +63,7 @@ def run_backtest(candles_by_symbol: dict[str, list[dict]], symbols: list[str],
     closed = positions_repo.get_closed_positions()
     win_count, loss_count = positions_repo.get_win_loss_counts()
     total_trades = win_count + loss_count
-    net_pnl = sum(p["realized_pnl"] for p in closed)
+    net_pnl = float(sum(p["realized_pnl"] for p in closed))
     wins = [p["realized_pnl"] for p in closed if p["realized_pnl"] > 0]
     losses = [p["realized_pnl"] for p in closed if p["realized_pnl"] < 0]
 

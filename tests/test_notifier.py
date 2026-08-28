@@ -13,6 +13,7 @@ def make_settings(topic=""):
             allow_fno=False, allow_fno_index=False, fno_paper_validated=False,
         ),
         ntfy_topic=topic,
+        candle_interval="5minute",
     )
 
 

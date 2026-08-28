@@ -6,9 +6,14 @@ Entry (BUY): short MA crosses above long MA, AND RSI is in a healthy
 Exit (SELL): short MA crosses back below long MA, OR RSI is overbought,
              OR a stop-loss threshold from entry price is hit.
 
-This strategy maintains its own rolling price history per symbol (fed by
-whatever last_traded_price the orchestrator passes in each cycle) rather
-than requiring a historical-data API call.
+This strategy maintains its own rolling candle-close history per symbol,
+populated by update_candles() from real OHLC candles (fetched periodically by
+Orchestrator via broker.get_recent_candles(), on a coarser cadence than the
+per-cycle poll) rather than from raw per-poll tick prices — see the
+CANDLE_INTERVAL comment below for why. decide() is still called every cycle
+with the latest last_traded_price, which drives execution (fill/reference
+price) and the stop-loss check, independent of the candle-close series used
+for MA/RSI.
 """
 import logging
 import time
@@ -46,6 +51,17 @@ MIN_CROSSOVER_GAP_PCT = 0.0002
 # allowed — kills the sub-minute flip-flops seen live (5s, 20s holds).
 COOLDOWN_SECONDS = 60
 
+# MA/RSI are computed off real OHLC candle closes (fetched periodically by
+# Orchestrator via broker.get_recent_candles(), see update_candles() below),
+# not raw per-poll tick prices — added 2026-08-28 after a live incident where
+# a frozen-then-resumed price pinned RSI near 100 within seconds on tick data
+# (RSI_WINDOW=14 at a 5s poll is only 70 seconds of history, far too
+# short-horizon and noise-prone). CANDLE_LOOKBACK_BARS gives headroom over the
+# warmup floor (max(SHORT_WINDOW, LONG_WINDOW, RSI_WINDOW+1) = 22) and over
+# nightly_optimize.py's parameter-sweep grid maximum.
+CANDLE_INTERVAL = "5minute"
+CANDLE_LOOKBACK_BARS = 60
+
 
 @dataclass(frozen=True)
 class MARsiParams:
@@ -61,6 +77,8 @@ class MARsiParams:
     stop_loss_pct: float = STOP_LOSS_PCT
     min_crossover_gap_pct: float = MIN_CROSSOVER_GAP_PCT
     cooldown_seconds: float = COOLDOWN_SECONDS
+    candle_interval: str = CANDLE_INTERVAL
+    candle_lookback_bars: int = CANDLE_LOOKBACK_BARS
 
 
 def _sma(prices: list[float], window: int) -> float | None:
@@ -123,6 +141,21 @@ class MARsiStrategy(BaseStrategy):
         state.entry_price = entry_price
         logger.info("%s: restored open position on startup, entry_price=%.2f", symbol, entry_price)
 
+    def get_candle_requirements(self) -> tuple[str, int]:
+        return self.params.candle_interval, self.params.candle_lookback_bars
+
+    def update_candles(self, symbol: str, candles: list[dict]) -> None:
+        """Replaces (not appends) this symbol's candle-close series — called by Orchestrator
+        on its coarser candle-fetch cadence, not every decide() cycle. An empty `candles` list
+        is a no-op (keeps the existing series), which is what makes a repeated fetch of an
+        unchanged (still-forming) candle set genuinely idempotent rather than merely
+        coincidentally so."""
+        if not candles:
+            return
+        state = self._get_state(symbol)
+        closes = [c["close"] for c in candles]
+        state.prices = deque(closes[-state.prices.maxlen:], maxlen=state.prices.maxlen)
+
     def get_debug_info(self, symbol: str) -> dict:
         p = self.params
         state = self._get_state(symbol)
@@ -160,7 +193,10 @@ class MARsiStrategy(BaseStrategy):
 
         p = self.params
         state = self._get_state(symbol)
-        state.prices.append(last_traded_price)
+        # state.prices is populated out-of-band by update_candles() from real candle closes,
+        # not appended here from last_traded_price — see CANDLE_INTERVAL comment above.
+        # last_traded_price is still used below for the stop-loss check and as the fill
+        # reference, so execution stays on live tick data even though signals don't.
         prices = list(state.prices)
 
         short_ma = _sma(prices, p.short_window)

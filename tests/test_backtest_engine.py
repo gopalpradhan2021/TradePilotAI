@@ -13,7 +13,7 @@ def make_settings(**risk_overrides):
         allow_fno=False, allow_fno_index=False, fno_paper_validated=False,
     )
     risk = replace(risk, **risk_overrides) if risk_overrides else risk
-    return Settings(mode="PAPER", risk=risk, ntfy_topic="")
+    return Settings(mode="PAPER", risk=risk, ntfy_topic="", candle_interval="5minute")
 
 
 def _candles(*closes, start=datetime(2026, 1, 1, 9, 15)):
@@ -54,3 +54,20 @@ def test_run_backtest_accepts_strategy_params_override_and_runs_end_to_end():
     # that the pipeline ran end to end and produced a coherent report shape.
     assert report["total_trades"] >= 0
     assert isinstance(report["net_pnl"], float)
+
+
+def test_run_backtest_produces_no_trades_when_fewer_bars_than_warmup_needs():
+    # 3 candles is fewer than long_window+1=5 needed to warm up — even with params that
+    # allow essentially any RSI/gap, there isn't enough candle history yet for a crossover
+    # to be computable, proving indicators are fed via Orchestrator's candle-fetch cadence
+    # (strategy.update_candles(), 1-bar-lagged on already-served candles only) rather than
+    # any other path.
+    candles = _candles(100.0, 105.0, 95.0)
+    params = MARsiParams(short_window=2, long_window=4, rsi_window=2,
+                          rsi_entry_min=0, rsi_entry_max=100, min_crossover_gap_pct=0.0,
+                          cooldown_seconds=0)
+
+    report = run_backtest({"RELIANCE": candles}, ["RELIANCE"], make_settings(), params)
+
+    assert report["bars_processed"] == 3
+    assert report["total_trades"] == 0

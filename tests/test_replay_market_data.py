@@ -56,3 +56,49 @@ def test_unknown_symbol_has_no_candles():
     client = ReplayMarketDataClient({"RELIANCE": _candles(100)})
 
     assert client.has_more("TCS") is False
+
+
+# --- get_historical_candles (PaperBroker.get_recent_candles() shim during backtest) --
+
+def test_get_historical_candles_returns_only_already_served_bars():
+    client = ReplayMarketDataClient({"RELIANCE": _candles(100, 101, 102, 103)})
+    client.get_quote("NSE", "CASH", "RELIANCE")
+    client.get_quote("NSE", "CASH", "RELIANCE")
+
+    result = client.get_historical_candles(
+        exchange="NSE", segment="CASH", groww_symbol="NSE-RELIANCE",
+        start_time="2026-01-01 00:00:00", end_time="2026-01-02 00:00:00",
+        candle_interval="5minute",
+    )
+
+    assert [row[4] for row in result["candles"]] == [100, 101]  # closes, no lookahead
+
+
+def test_get_historical_candles_before_any_consumption_returns_empty():
+    client = ReplayMarketDataClient({"RELIANCE": _candles(100, 101)})
+
+    result = client.get_historical_candles(
+        exchange="NSE", segment="CASH", groww_symbol="NSE-RELIANCE",
+        start_time="2026-01-01 00:00:00", end_time="2026-01-02 00:00:00",
+        candle_interval="5minute",
+    )
+
+    assert result == {"candles": []}
+
+
+def test_get_historical_candles_tolerates_missing_ohlv_fields():
+    client = ReplayMarketDataClient({"RELIANCE": _candles(100)})
+    client.get_quote("NSE", "CASH", "RELIANCE")
+
+    result = client.get_historical_candles(
+        exchange="NSE", segment="CASH", groww_symbol="NSE-RELIANCE",
+        start_time="2026-01-01 00:00:00", end_time="2026-01-02 00:00:00",
+        candle_interval="5minute",
+    )
+
+    row = result["candles"][0]
+    assert row[1] == 100  # open falls back to close
+    assert row[2] == 100  # high falls back to close
+    assert row[3] == 100  # low falls back to close
+    assert row[4] == 100  # close
+    assert row[5] == 0    # volume falls back to 0
