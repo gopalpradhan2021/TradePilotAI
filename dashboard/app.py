@@ -786,33 +786,47 @@ def api_bot_start(request: Request, reason: str = "manual start (dashboard)"):
     })
 
 
+def _trust_flag(best: dict | None, baseline_out: dict) -> tuple[str, str]:
+    """Maps real optimization-run data to a 3-state trust flag. Not a fabricated
+    field — derived from the same insufficient_sample/out_sample numbers the page
+    already had, just surfaced as a badge instead of buried parenthetical text."""
+    if best is None:
+        return "REVIEW NEEDED", "flag-review"
+    if best.get("insufficient_sample"):
+        return "LOW SAMPLE", "flag-lowsample"
+    if best["out_sample"]["net_pnl"] <= baseline_out["net_pnl"]:
+        return "REVIEW NEEDED", "flag-review"
+    return "OPTIMAL", "flag-optimal"
+
+
 def _render_backtest_page(form: dict, result: dict | None, error: str | None) -> str:
     from core.db import optimization_repo
 
+    status_badge = ""
     if error:
-        result_html = f'''<div class="card" style="border-color:#e74c3c;">
-            <h3 style="margin-top:0;color:#e74c3c;">Backtest failed</h3>
-            <pre class="mono" style="white-space:pre-wrap;font-size:0.85rem;color:#e6edf3;margin:0;">{error}</pre>
-        </div>'''
+        status_badge = '<span class="run-badge badge-error">Failed</span>'
+        results_body = f'''<pre class="mono" style="white-space:pre-wrap;font-size:0.85rem;color:#e6edf3;margin:0;">{error}</pre>'''
     elif result:
+        status_badge = '<span class="run-badge badge-ok">Simulation complete</span>'
         def _fmt(v):
             return "—" if v is None else v
         pnl = result.get('net_pnl', 0)
         pnl_color = "#e74c3c" if pnl < 0 else "#2ecc71"
-        result_html = f"""
-        <div class="card">
-            <h3 style="margin-top:0;">Result</h3>
-            <div class="stat-row">
-                <div class="stat"><div class="label">Bars processed</div><div class="value mono">{result.get('bars_processed')}</div></div>
-                <div class="stat"><div class="label">Trades</div><div class="value mono">{result.get('total_trades')}</div></div>
-                <div class="stat"><div class="label">Win rate</div><div class="value mono">{_fmt(result.get('win_rate_pct'))}{'%' if result.get('win_rate_pct') is not None else ''}</div></div>
-                <div class="stat"><div class="label">Net P&amp;L</div><div class="value mono" style="color:{pnl_color};">₹{pnl:,.2f}</div></div>
-                <div class="stat"><div class="label">Max drawdown</div><div class="value mono">₹{result.get('max_drawdown', 0):,.2f}</div></div>
-            </div>
+        win_rate = result.get('win_rate_pct')
+        results_body = f"""
+        <div class="tile-grid">
+            <div class="tile"><div class="label">Bars processed</div><div class="value mono">{result.get('bars_processed')}</div></div>
+            <div class="tile"><div class="label">Trades executed</div><div class="value mono">{result.get('total_trades')}</div></div>
+            <div class="tile tile-accent"><div class="label">Win rate</div><div class="value mono">{_fmt(win_rate)}{'%' if win_rate is not None else ''}</div></div>
+            <div class="tile tile-danger"><div class="label">Max drawdown</div><div class="value mono">₹{result.get('max_drawdown', 0):,.2f}</div></div>
+        </div>
+        <div class="pnl-box">
+            <div class="label">Net P&amp;L</div>
+            <div class="value mono" style="color:{pnl_color};font-size:1.4rem;">₹{pnl:,.2f}</div>
         </div>
         """
     else:
-        result_html = ""
+        results_body = '<p class="dim" style="font-size:0.85rem;">Configure a run and press Run backtest to see results here.</p>'
 
     runs = optimization_repo.get_recent_runs(limit=10)
     opt_rows = ""
@@ -820,15 +834,15 @@ def _render_backtest_page(form: dict, result: dict | None, error: str | None) ->
         best = run["candidates"][0] if run["candidates"] else None
         baseline_out = run["baseline"]["out_sample"]
         best_out = best["out_sample"] if best else None
-        flag = (" <span class='dim' style=\"font-size:0.7rem;\">(insufficient sample)</span>"
-                if best and best.get("insufficient_sample") else "")
+        flag_label, flag_class = _trust_flag(best, baseline_out)
         opt_rows += (
             f"<tr><td class='mono dim'>{run['run_at'][:19]}</td><td>{run['symbol']}</td>"
             f"<td class='mono num'>₹{baseline_out['net_pnl']:.2f} <span class='dim'>({baseline_out['total_trades']} trades)</span></td>"
-            f"<td class='mono num'>{'₹%.2f <span class=\"dim\">(%d trades)</span>%s' % (best_out['net_pnl'], best_out['total_trades'], flag) if best_out else '—'}</td>"
+            f"<td class='mono num'>{'₹%.2f <span class=\"dim\">(%d trades)</span>' % (best_out['net_pnl'], best_out['total_trades']) if best_out else '—'}</td>"
+            f"<td class='num'><span class='flag {flag_class}'>{flag_label}</span></td>"
             f"<td class='mono num'>{run['combinations_tried']}</td></tr>"
         )
-    opt_rows = opt_rows or "<tr><td colspan='5' class='dim'>No nightly optimization runs yet.</td></tr>"
+    opt_rows = opt_rows or "<tr><td colspan='6' class='dim'>No nightly optimization runs yet.</td></tr>"
 
     return f"""
 <!DOCTYPE html>
@@ -860,9 +874,11 @@ def _render_backtest_page(form: dict, result: dict | None, error: str | None) ->
                          letter-spacing: 0.04em; }}
         .stat .value {{ font-size: 1.2rem; font-weight: 600; }}
         .stat-row {{ display: flex; flex-wrap: wrap; gap: 20px 0; }}
-        .form-grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px;
-                      align-items: end; }}
-        @media (max-width: 700px) {{ .form-grid {{ grid-template-columns: 1fr 1fr; }} }}
+        .backtest-grid {{ display: grid; grid-template-columns: 360px 1fr; gap: 20px;
+                           align-items: start; }}
+        @media (max-width: 900px) {{ .backtest-grid {{ grid-template-columns: 1fr; }} }}
+        .form-grid {{ display: grid; grid-template-columns: 1fr; gap: 16px; }}
+        .form-grid .field-pair {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }}
         .field {{ display: flex; flex-direction: column; gap: 6px; }}
         .field label {{ color: #7d8590; font-size: 0.72rem; text-transform: uppercase;
                          letter-spacing: 0.04em; }}
@@ -871,9 +887,32 @@ def _render_backtest_page(form: dict, result: dict | None, error: str | None) ->
                           font-family: inherit; width: 100%; }}
         input:focus, select:focus {{ outline: 2px solid #58a6ff; outline-offset: -1px;
                                       border-color: #58a6ff; }}
-        button.run-btn {{ margin-top: 18px; padding: 9px 22px; border-radius: 5px; border: none;
+        button.run-btn {{ margin-top: 4px; padding: 9px 22px; border-radius: 5px; border: none;
                            background: #58a6ff; color: #0d1117; font-weight: 700; font-size: 0.85rem;
-                           cursor: pointer; }}
+                           cursor: pointer; width: 100%; }}
+        .card-head {{ display: flex; align-items: center; justify-content: space-between;
+                      gap: 12px; margin-bottom: 14px; }}
+        .card-head h3 {{ margin: 0; }}
+        .run-badge {{ font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+                      letter-spacing: 0.04em; padding: 3px 9px; border-radius: 20px; white-space: nowrap; }}
+        .badge-ok {{ color: #2ecc71; background: rgba(46, 204, 113, 0.12); border: 1px solid rgba(46, 204, 113, 0.35); }}
+        .badge-error {{ color: #e74c3c; background: rgba(231, 76, 60, 0.12); border: 1px solid rgba(231, 76, 60, 0.35); }}
+        .tile-grid {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }}
+        @media (max-width: 560px) {{ .tile-grid {{ grid-template-columns: 1fr 1fr; }} }}
+        .tile {{ background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
+                  padding: 12px 14px; display: flex; flex-direction: column; gap: 4px; }}
+        .tile .label {{ color: #7d8590; font-size: 0.68rem; text-transform: uppercase;
+                         letter-spacing: 0.04em; }}
+        .tile .value {{ font-size: 1.15rem; font-weight: 600; }}
+        .tile-accent {{ border-color: rgba(88, 166, 255, 0.4); }}
+        .tile-danger .value {{ color: #e74c3c; }}
+        .pnl-box {{ margin-top: 14px; background: #0d1117; border: 1px solid #30363d;
+                     border-radius: 6px; padding: 14px 16px; }}
+        .flag {{ display: inline-block; font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
+                  letter-spacing: 0.04em; padding: 3px 9px; border-radius: 20px; white-space: nowrap; }}
+        .flag-optimal {{ color: #2ecc71; background: rgba(46, 204, 113, 0.12); border: 1px solid rgba(46, 204, 113, 0.35); }}
+        .flag-lowsample {{ color: #d29922; background: rgba(210, 153, 34, 0.12); border: 1px solid rgba(210, 153, 34, 0.35); }}
+        .flag-review {{ color: #8b949e; background: rgba(139, 148, 158, 0.1); border: 1px solid rgba(139, 148, 158, 0.3); }}
         .topnav {{ display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
                    padding: 14px 4px; border-bottom: 1px solid #21262d; margin-bottom: 18px; }}
         .topnav-left {{ display: flex; align-items: center; gap: 12px; }}
@@ -913,33 +952,44 @@ def _render_backtest_page(form: dict, result: dict | None, error: str | None) ->
         (1minute/5minute/15minute/1hour), 180 days max for 1day.
     </p>
 
-    <div class="card">
-        <form method="post" action="/backtest">
-            <div class="form-grid">
-                <div class="field">
-                    <label>Symbols (comma-separated)</label>
-                    <input type="text" name="symbols" value="{form.get('symbols', 'RELIANCE')}">
+    <div class="backtest-grid">
+        <div class="card">
+            <h3 style="margin-top:0;">Configuration</h3>
+            <form method="post" action="/backtest">
+                <div class="form-grid">
+                    <div class="field">
+                        <label>Symbols (comma-separated)</label>
+                        <input type="text" name="symbols" value="{form.get('symbols', 'RELIANCE')}">
+                    </div>
+                    <div class="field-pair">
+                        <div class="field">
+                            <label>Start</label>
+                            <input type="text" name="start" value="{form.get('start', '')}" placeholder="YYYY-MM-DD">
+                        </div>
+                        <div class="field">
+                            <label>End</label>
+                            <input type="text" name="end" value="{form.get('end', '')}" placeholder="YYYY-MM-DD">
+                        </div>
+                    </div>
+                    <div class="field">
+                        <label>Interval</label>
+                        <select name="interval">
+                            {"".join(f'<option value="{iv}" {"selected" if form.get("interval") == iv else ""}>{iv}</option>' for iv in ["5minute", "1minute", "15minute", "1hour", "1day"])}
+                        </select>
+                    </div>
+                    <button type="submit" class="run-btn">Run backtest</button>
                 </div>
-                <div class="field">
-                    <label>Start</label>
-                    <input type="text" name="start" value="{form.get('start', '')}" placeholder="YYYY-MM-DD">
-                </div>
-                <div class="field">
-                    <label>End</label>
-                    <input type="text" name="end" value="{form.get('end', '')}" placeholder="YYYY-MM-DD">
-                </div>
-                <div class="field">
-                    <label>Interval</label>
-                    <select name="interval">
-                        {"".join(f'<option value="{iv}" {"selected" if form.get("interval") == iv else ""}>{iv}</option>' for iv in ["5minute", "1minute", "15minute", "1hour", "1day"])}
-                    </select>
-                </div>
-            </div>
-            <button type="submit" class="run-btn">Run backtest</button>
-        </form>
-    </div>
+            </form>
+        </div>
 
-    {result_html}
+        <div class="card">
+            <div class="card-head">
+                <h3>Backtest Results</h3>
+                {status_badge}
+            </div>
+            {results_body}
+        </div>
+    </div>
 
     <div class="card">
         <h3 style="margin-top:0;">Nightly optimization history</h3>
@@ -950,7 +1000,7 @@ def _render_backtest_page(form: dict, result: dict | None, error: str | None) ->
         </p>
         <div class="scroll-table">
             <table>
-                <tr><th>Run</th><th>Symbol</th><th class="num">Baseline (out-of-sample)</th><th class="num">Best candidate (out-of-sample)</th><th class="num">Combos tried</th></tr>
+                <tr><th>Run</th><th>Symbol</th><th class="num">Baseline (out-of-sample)</th><th class="num">Best candidate (out-of-sample)</th><th class="num">Trust flag</th><th class="num">Combos tried</th></tr>
                 {opt_rows}
             </table>
         </div>
