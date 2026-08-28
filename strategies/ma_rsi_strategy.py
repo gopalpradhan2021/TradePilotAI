@@ -37,6 +37,10 @@ RSI_ENTRY_MIN = 30
 RSI_ENTRY_MAX = 70
 RSI_EXIT_OVERBOUGHT = 75
 STOP_LOSS_PCT = 2.0
+# Nominal placeholder — this strategy stays capital-agnostic (CLAUDE.md), so it can't
+# compute a real position size itself. Orchestrator._handle_proposed_order() overwrites
+# order.qty for every CASH order before it's ever persisted: capital-aware sizing on
+# entry (core/position_sizing.py), the real held qty on exit.
 DEFAULT_ORDER_QTY = 1
 
 # Minimum relative gap between short/long MA required to count as a real

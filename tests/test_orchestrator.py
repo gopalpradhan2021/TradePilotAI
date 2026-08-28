@@ -8,6 +8,7 @@ from core.db import orders_repo, positions_repo
 from core.execution import BrokerPositionFetchError, PaperBroker
 from core.models import OptionChainSnapshot, ProposedOrder, ExecutionResult, Segment, Side, OrderType
 from core.orchestrator import Orchestrator
+from core.position_sizing import calculate_entry_qty
 from core.risk_manager import RiskManager
 from strategies.base_strategy import BaseStrategy
 
@@ -123,7 +124,9 @@ def make_sell_order(symbol="RELIANCE", qty=1):
 
 
 def test_approved_buy_order_fills_and_opens_position():
-    settings = make_settings()
+    # max_order_value_inr=100 pins resized qty to exactly 1 at price 100.0, keeping this
+    # test's assertions about qty==1 valid under capital-aware sizing (core/position_sizing.py).
+    settings = make_settings(max_order_value_inr=100)
     risk_manager = RiskManager(settings.risk)
     broker = FixedPriceBroker(price=100.0)
     strategy = ScriptedStrategy({"RELIANCE": [make_buy_order()]})
@@ -160,7 +163,10 @@ def test_rejected_order_is_blocked_and_no_position_opened():
 
 
 def test_sell_closes_position_and_records_pnl():
-    settings = make_settings()
+    # max_order_value_inr=150 pins resized BUY qty to exactly 1 at price 100.0 (150 // 100 == 1),
+    # matching this test's hand-computed expected P&L/charges basis below, while staying above
+    # the SELL leg's own notional value (110.0 * 1) so the exit isn't rejected by the same cap.
+    settings = make_settings(max_order_value_inr=150)
     risk_manager = RiskManager(settings.risk)
     broker = FixedPriceBroker(price=100.0)
     strategy = ScriptedStrategy({"RELIANCE": [make_buy_order()]})
@@ -183,7 +189,9 @@ def test_sell_closes_position_and_records_pnl():
 
 
 def test_cash_order_charges_are_persisted_on_order_and_position():
-    settings = make_settings()
+    # max_order_value_inr=100 pins resized qty to exactly 1, matching expected_charges'
+    # trade-value basis (100.0 * 1) below.
+    settings = make_settings(max_order_value_inr=100)
     risk_manager = RiskManager(settings.risk)
     broker = FixedPriceBroker(price=100.0)
     strategy = ScriptedStrategy({"RELIANCE": [make_buy_order()]})
@@ -892,3 +900,138 @@ def test_candle_update_uses_injected_clock_not_real_time():
     fake_clock["now"] += 61  # past _CANDLE_FETCH_INTERVAL_SEC (60), by the injected clock only
     orchestrator.run_once(symbols=["RELIANCE"])
     assert len(broker.candle_calls) == 1
+
+
+# --- capital-aware CASH position sizing -----------------------------------
+
+class NoneLtpBroker(FixedPriceBroker):
+    """get_ltp() always returns None — used to reach the resize step's ref_price is None
+    guard, since MARsiStrategy itself always guards this and can't exercise the gap."""
+
+    def get_ltp(self, symbol, segment=None):
+        return None
+
+
+def test_buy_order_qty_resized_from_available_capital():
+    settings = make_settings(max_order_value_inr=50_000, total_capital_inr=50_000,
+                              max_position_qty=1_000)
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=100.0)
+    strategy = ScriptedStrategy({"RELIANCE": [make_buy_order()]})
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+
+    orchestrator.run_once(symbols=["RELIANCE"])
+
+    expected_qty = calculate_entry_qty(100.0, 50_000.0, 50_000.0, 1_000)
+    assert expected_qty == 500  # sanity-check the hand expectation itself
+
+    orders = orders_repo.get_recent_orders(10)
+    assert orders[0]["qty"] == expected_qty  # resize is visible on the persisted order row
+    position = positions_repo.get_open_position("RELIANCE")
+    assert position["qty"] == expected_qty
+
+
+def test_buy_order_qty_resize_respects_deployed_capital_from_prior_position():
+    # Seed an existing open position directly (mirrors test_risk_manager.py's own
+    # "deployed capital" test pattern) so available_capital = total - already_deployed,
+    # not just total_capital_inr.
+    oid = orders_repo.insert_order(make_buy_order(symbol="RELIANCE"), status="FILLED",
+                                    reference_price=8000.0)
+    positions_repo.open_position(symbol="RELIANCE", qty=1, entry_price=8000.0, entry_order_id=oid)
+
+    settings = make_settings(max_order_value_inr=100_000, total_capital_inr=10_000,
+                              max_position_qty=1_000)
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=50.0)
+    strategy = ScriptedStrategy({"TCS": [make_buy_order(symbol="TCS")]})
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+
+    orchestrator.run_once(symbols=["TCS"])
+
+    # available_capital = 10_000 - 8_000 = 2_000 -> floor(2000 / 50) = 40, well under the
+    # (deliberately loose) value/qty caps, proving deployed capital is what binds here.
+    position = positions_repo.get_open_position("TCS")
+    assert position["qty"] == 40
+
+
+def test_unaffordable_buy_order_is_blocked_not_crashed():
+    settings = make_settings(max_order_value_inr=50, total_capital_inr=50, max_position_qty=1_000)
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=100.0)  # resized qty = 0 (50 // 100)
+    strategy = ScriptedStrategy({"RELIANCE": [make_buy_order()]})
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+
+    orchestrator.run_once(symbols=["RELIANCE"])  # must not raise
+
+    orders = orders_repo.get_recent_orders(10)
+    assert orders[0]["status"] == "BLOCKED"
+    assert "Quantity must be positive" in orders[0]["message"]
+    assert positions_repo.get_open_position("RELIANCE") is None
+
+
+def test_buy_order_resize_skips_cleanly_when_no_reference_price_available():
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    broker = NoneLtpBroker(price=100.0)  # get_ltp() -> None; order has no limit_price either
+    strategy = ScriptedStrategy({"RELIANCE": [make_buy_order()]})
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+
+    orchestrator.run_once(symbols=["RELIANCE"])  # must not raise
+
+    orders = orders_repo.get_recent_orders(10)
+    assert orders[0]["status"] == "BLOCKED"
+    assert "No reference price available" in orders[0]["message"]
+
+
+def test_sell_order_qty_overridden_to_match_held_position():
+    # Seed a position at a qty that would never come from today's DEFAULT_ORDER_QTY=1
+    # placeholder, proving the SELL branch reads the real held qty rather than trusting
+    # whatever the strategy proposed.
+    oid = orders_repo.insert_order(make_buy_order(symbol="RELIANCE", qty=40), status="FILLED",
+                                    reference_price=100.0)
+    positions_repo.open_position(symbol="RELIANCE", qty=40, entry_price=100.0, entry_order_id=oid)
+
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=110.0)
+    strategy = ScriptedStrategy({"RELIANCE": [make_sell_order(qty=1)]})  # stale placeholder qty
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+
+    orchestrator.run_once(symbols=["RELIANCE"])
+
+    orders = orders_repo.get_recent_orders(10)
+    assert orders[0]["qty"] == 40  # not the strategy's placeholder qty=1
+    assert positions_repo.get_open_position("RELIANCE") is None  # fully closed
+
+
+def test_sell_order_with_no_open_position_leaves_qty_unresized():
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=110.0)
+    strategy = ScriptedStrategy({"RELIANCE": [make_sell_order(qty=1)]})
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+
+    orchestrator.run_once(symbols=["RELIANCE"])  # must not raise — no open position to close
+
+    orders = orders_repo.get_recent_orders(10)
+    assert orders[0]["qty"] == 1  # left as the strategy proposed it
+
+
+def test_fno_order_qty_never_resized_by_cash_sizing_logic():
+    # Generous caps (so the order is approved for reasons unrelated to sizing) — the point
+    # is that order.qty stays exactly what the strategy proposed (1), never recomputed by
+    # core/position_sizing.py, since the resize step is gated on segment == CASH.
+    settings = make_settings(allow_fno=True, allow_fno_index=True)
+    risk_manager = RiskManager(settings.risk, mode="PAPER")
+    broker = FixedPriceBroker(price=200.0)
+    fno_strategy = ScriptedFnoStrategy({"NIFTY": [make_fno_order(qty=1, lot_size=75)]})
+    chain = make_chain(strikes=[make_matching_strike(ltp=200.0)])
+    fno_market_data = StubFnoMarketData({"NIFTY": chain})
+    orchestrator = Orchestrator(settings, broker, risk_manager, ScriptedStrategy({}),
+                                 fno_strategy=fno_strategy, fno_market_data=fno_market_data)
+
+    orchestrator.run_once_fno(["NIFTY"])
+
+    orders = orders_repo.get_recent_orders(10)
+    assert orders[0]["qty"] == 1
+    assert orders[0]["status"] == "FILLED"

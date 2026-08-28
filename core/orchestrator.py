@@ -14,6 +14,7 @@ from core.cost_model import calculate_order_charges
 from core.db import orders_repo, positions_repo, risk_repo
 from core.market_hours import is_market_open
 from core.models import ProposedOrder, Segment, Side
+from core.position_sizing import calculate_entry_qty
 from core.notifier import send_notification
 from core.reconciliation import reconcile_positions
 from core.status_writer import write_heartbeat
@@ -241,6 +242,30 @@ class Orchestrator:
 
     def _handle_proposed_order(self, order: ProposedOrder, ltp: float | None):
         ref_price = order.limit_price or ltp
+        # Capital-aware CASH sizing — the strategy's qty (DEFAULT_ORDER_QTY, a nominal
+        # placeholder) gets overwritten here, before the order is ever persisted, so the
+        # audit trail and risk_manager.check() both see the FINAL qty, never a placeholder.
+        # FNO is untouched — IvOiStrategy manages its own lot-based qty/lot_size directly.
+        # Guarded on ref_price is not None: a future CASH strategy or a LIMIT order with no
+        # limit_price and a failed LTP fetch could reach here with nothing to size against —
+        # skip resize and let risk_manager.check()'s existing "No reference price available"
+        # rejection handle it unresized, same as today.
+        if order.segment == Segment.CASH and ref_price is not None:
+            if order.side == Side.BUY:
+                available_capital = self.settings.risk.total_capital_inr - positions_repo.get_deployed_capital()
+                order.qty = calculate_entry_qty(
+                    ref_price, available_capital,
+                    self.settings.risk.max_order_value_inr, self.settings.risk.max_position_qty,
+                )
+            else:
+                # SELL must always close the REAL held qty, never re-derive/guess it — this
+                # is also what keeps exit charges (calculate_order_charges below) correct,
+                # not just the broker order quantity.
+                open_pos = positions_repo.get_open_position(order.symbol)
+                if open_pos is not None:
+                    order.qty = open_pos["qty"]
+                # else: leave order.qty unresized — matches the existing defensive
+                # `else: pnl_delta = 0.0` fallback later in this method.
         try:
             order_id = orders_repo.insert_order(order, status="PROPOSED", reference_price=ref_price)
         except orders_repo.DuplicateIdempotencyKeyError:
