@@ -15,14 +15,19 @@ def get_open_position(symbol: str) -> dict | None:
         return dict(row) if row else None
 
 
-def open_position(symbol: str, qty: int, entry_price: float, entry_order_id: int) -> int:
+def open_position(symbol: str, qty: int, entry_price: float, entry_order_id: int,
+                   segment: str = "CASH", underlying_symbol: str | None = None,
+                   margin_used: float | None = None) -> int:
     with get_connection() as conn:
         cur = conn.execute(
             """
-            INSERT INTO positions (symbol, status, qty, entry_price, entry_order_id, opened_at)
-            VALUES (?, 'OPEN', ?, ?, ?, ?)
+            INSERT INTO positions
+                (symbol, status, qty, entry_price, entry_order_id, opened_at,
+                 segment, underlying_symbol, margin_used)
+            VALUES (?, 'OPEN', ?, ?, ?, ?, ?, ?, ?)
             """,
-            (symbol, qty, entry_price, entry_order_id, _now()),
+            (symbol, qty, entry_price, entry_order_id, _now(),
+             segment, underlying_symbol, margin_used),
         )
         conn.commit()
         return cur.lastrowid
@@ -51,9 +56,17 @@ def close_position(symbol: str, exit_price: float, exit_order_id: int) -> float:
 
 
 def get_deployed_capital() -> float:
+    # FNO capital-at-risk is real margin, not notional (qty*entry_price) — margin_used is
+    # captured at fill time from RiskManager's margin check, see core/orchestrator.py.
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT COALESCE(SUM(qty * entry_price), 0) AS total FROM positions WHERE status = 'OPEN'"
+            """
+            SELECT COALESCE(SUM(
+                CASE WHEN segment = 'FNO' THEN COALESCE(margin_used, 0)
+                     ELSE qty * entry_price END
+            ), 0) AS total
+            FROM positions WHERE status = 'OPEN'
+            """
         ).fetchone()
         return row["total"]
 
@@ -61,7 +74,10 @@ def get_deployed_capital() -> float:
 def get_open_positions() -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT symbol, qty, entry_price, opened_at FROM positions WHERE status = 'OPEN'"
+            """
+            SELECT symbol, qty, entry_price, opened_at, segment, underlying_symbol, margin_used
+            FROM positions WHERE status = 'OPEN'
+            """
         ).fetchall()
         return [dict(r) for r in rows]
 

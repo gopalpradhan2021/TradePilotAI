@@ -10,7 +10,7 @@ def make_settings(**risk_overrides):
     risk = RiskConfig(
         max_order_value_inr=100_000, max_daily_loss_inr=10_000, max_trades_per_day=50,
         max_position_qty=1_000, price_sanity_band_pct=3.0, total_capital_inr=1_000_000,
-        allow_fno=False,
+        allow_fno=False, allow_fno_index=False, fno_paper_validated=False,
     )
     risk = replace(risk, **risk_overrides) if risk_overrides else risk
     return Settings(mode="PAPER", risk=risk, ntfy_topic="")

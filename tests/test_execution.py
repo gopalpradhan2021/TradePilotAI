@@ -21,18 +21,32 @@ class FakeGrowwClient:
     SEGMENT_CASH = "CASH"
     SEGMENT_FNO = "FNO"
     PRODUCT_MIS = "MIS"
+    PRODUCT_NRML = "NRML"
     VALIDITY_DAY = "DAY"
+    TRANSACTION_TYPE_BUY = "BUY"
+    TRANSACTION_TYPE_SELL = "SELL"
+    ORDER_TYPE_MARKET = "MARKET"
 
     def __init__(self, response=None, raise_exc=None,
                  quote_response=None, quote_raise_exc=None,
                  position_response=None, position_raise_exc=None,
                  order_status_response=None, order_status_raise_exc=None,
-                 cancel_response=None, cancel_raise_exc=None):
+                 cancel_response=None, cancel_raise_exc=None,
+                 expiries_response=None, expiries_raise_exc=None,
+                 option_chain_response=None, option_chain_raise_exc=None,
+                 order_margin_response=None, order_margin_raise_exc=None,
+                 available_margin_response=None, available_margin_raise_exc=None,
+                 instrument_response=None, instrument_raise_exc=None):
         self.calls = []
         self.quote_calls = []
         self.position_calls = []
         self.order_status_calls = []
         self.cancel_calls = []
+        self.expiries_calls = []
+        self.option_chain_calls = []
+        self.instrument_calls = []
+        self.order_margin_calls = []
+        self.available_margin_calls = []
         self._response = response if response is not None else {
             "groww_order_id": "ORD123", "order_status": "PENDING",
         }
@@ -45,6 +59,28 @@ class FakeGrowwClient:
         self._order_status_raise_exc = order_status_raise_exc
         self._cancel_response = cancel_response if cancel_response is not None else {"order_status": "CANCELLED"}
         self._cancel_raise_exc = cancel_raise_exc
+        self._expiries_response = expiries_response if expiries_response is not None else {"expiries": []}
+        self._expiries_raise_exc = expiries_raise_exc
+        self._option_chain_response = option_chain_response if option_chain_response is not None else {
+            "underlying_ltp": 0.0, "strikes": {},
+        }
+        self._option_chain_raise_exc = option_chain_raise_exc
+        self._order_margin_response = order_margin_response if order_margin_response is not None else {
+            "total_requirement": 0.0,
+        }
+        self._order_margin_raise_exc = order_margin_raise_exc
+        self._available_margin_response = available_margin_response if available_margin_response is not None else {
+            "fno_margin_details": {
+                "future_balance_available": 0.0,
+                "option_buy_balance_available": 0.0,
+                "option_sell_balance_available": 0.0,
+            },
+        }
+        self._available_margin_raise_exc = available_margin_raise_exc
+        self._instrument_response = instrument_response if instrument_response is not None else {
+            "lot_size": "75",
+        }
+        self._instrument_raise_exc = instrument_raise_exc
 
     def place_order(self, **kwargs):
         self.calls.append(kwargs)
@@ -75,6 +111,36 @@ class FakeGrowwClient:
         if self._cancel_raise_exc is not None:
             raise self._cancel_raise_exc
         return self._cancel_response
+
+    def get_expiries(self, **kwargs):
+        self.expiries_calls.append(kwargs)
+        if self._expiries_raise_exc is not None:
+            raise self._expiries_raise_exc
+        return self._expiries_response
+
+    def get_option_chain(self, **kwargs):
+        self.option_chain_calls.append(kwargs)
+        if self._option_chain_raise_exc is not None:
+            raise self._option_chain_raise_exc
+        return self._option_chain_response
+
+    def get_order_margin_details(self, **kwargs):
+        self.order_margin_calls.append(kwargs)
+        if self._order_margin_raise_exc is not None:
+            raise self._order_margin_raise_exc
+        return self._order_margin_response
+
+    def get_available_margin_details(self, **kwargs):
+        self.available_margin_calls.append(kwargs)
+        if self._available_margin_raise_exc is not None:
+            raise self._available_margin_raise_exc
+        return self._available_margin_response
+
+    def get_instrument_by_exchange_and_trading_symbol(self, **kwargs):
+        self.instrument_calls.append(kwargs)
+        if self._instrument_raise_exc is not None:
+            raise self._instrument_raise_exc
+        return self._instrument_response
 
 
 def test_paper_broker_fills_at_ltp_when_no_limit_price():
@@ -107,12 +173,17 @@ def test_build_trading_symbol_cash_segment_is_plain_symbol():
     assert _build_trading_symbol(order) == "RELIANCE"
 
 
-def test_build_trading_symbol_fno_option():
+def test_build_trading_symbol_fno_option_passes_symbol_through_verbatim():
+    # order.symbol is already the real broker trading_symbol, sourced from
+    # get_option_chain() at decision time — _build_trading_symbol() must not try to
+    # reconstruct it. A prior version guessed a 3-letter-month format here that live
+    # testing showed does not match what Groww's own API actually returns or accepts.
     order = make_order(
-        symbol="NIFTY", segment=Segment.FNO, lot_size=50,
-        expiry_date=date(2026, 9, 25), strike_price=25000.0, option_type=OptionType.CE,
+        symbol="NIFTY2690122000CE", segment=Segment.FNO, lot_size=75,
+        expiry_date=date(2026, 9, 1), strike_price=22000.0, option_type=OptionType.CE,
+        underlying_symbol="NIFTY",
     )
-    assert _build_trading_symbol(order) == "NIFTY26SEP25000CE"
+    assert _build_trading_symbol(order) == "NIFTY2690122000CE"
 
 
 def test_build_trading_symbol_fno_future_without_strike():
@@ -365,3 +436,127 @@ def test_cancel_order_reauths_on_auth_exception(monkeypatch):
 
     assert result == {"order_status": "CANCELLED"}
     assert broker.client is new_client
+
+
+# --- get_expiries / get_option_chain / get_lot_size (Phase A: F&O infra) --
+
+_REALISTIC_CHAIN_RESPONSE = {
+    "underlying_ltp": 24092.8,
+    "strikes": {
+        "22000": {
+            "CE": {
+                "trading_symbol": "NIFTY2690122000CE", "ltp": 2187.1,
+                "open_interest": 75, "volume": 0,
+                "greeks": {"delta": 0.9975, "gamma": 0, "theta": -0.7534,
+                           "vega": 0.1976, "rho": 2.4765, "iv": 31.4553},
+            },
+            "PE": {
+                "trading_symbol": "NIFTY2690122000PE", "ltp": 0.6,
+                "open_interest": 57357, "volume": 69547,
+                "greeks": {"delta": -0.0025, "gamma": 0, "theta": -0.7534,
+                           "vega": 0.1976, "rho": -0.0068, "iv": 31.4553},
+            },
+        },
+        "22050": {
+            "CE": {
+                "trading_symbol": "NIFTY2690122050CE", "ltp": 2059.15,
+                "open_interest": 0, "volume": 0,
+                "greeks": {"delta": 0.9976, "gamma": 0, "theta": -0.6972,
+                           "vega": 0.1886, "rho": 2.4825, "iv": 30.5038},
+            },
+            # deliberately no PE here — real responses can be one-sided at extreme strikes
+        },
+    },
+}
+
+
+def test_paper_broker_get_expiries_parses_iso_dates():
+    client = FakeGrowwClient(expiries_response={"expiries": ["2026-09-01", "2026-09-08"]})
+    broker = PaperBroker(market_data_client=client)
+
+    result = broker.get_expiries("NIFTY")
+
+    assert result == [date(2026, 9, 1), date(2026, 9, 8)]
+
+
+def test_paper_broker_get_expiries_without_client_returns_none():
+    broker = PaperBroker(market_data_client=None)
+    assert broker.get_expiries("NIFTY") is None
+
+
+def test_paper_broker_get_option_chain_parses_realistic_response():
+    client = FakeGrowwClient(option_chain_response=_REALISTIC_CHAIN_RESPONSE)
+    broker = PaperBroker(market_data_client=client)
+
+    snapshot = broker.get_option_chain("NIFTY", date(2026, 9, 1))
+
+    assert snapshot is not None
+    assert snapshot.underlying == "NIFTY"
+    assert snapshot.underlying_ltp == 24092.8
+    assert snapshot.expiry_date == date(2026, 9, 1)
+    assert [s.strike for s in snapshot.strikes] == [22000.0, 22050.0]  # sorted ascending
+
+    first = snapshot.strikes[0]
+    assert first.ce.trading_symbol == "NIFTY2690122000CE"
+    assert first.ce.open_interest == 75
+    assert first.ce.greeks.iv == 31.4553
+    assert first.ce.greeks.delta == 0.9975
+    assert first.pe.trading_symbol == "NIFTY2690122000PE"
+
+    second = snapshot.strikes[1]
+    assert second.ce is not None
+    assert second.pe is None  # one-sided strike handled without crashing
+
+
+def test_paper_broker_get_option_chain_without_client_returns_none():
+    broker = PaperBroker(market_data_client=None)
+    assert broker.get_option_chain("NIFTY", date(2026, 9, 1)) is None
+
+
+def test_paper_broker_get_option_chain_returns_none_on_fetch_error():
+    client = FakeGrowwClient(option_chain_raise_exc=RuntimeError("network down"))
+    broker = PaperBroker(market_data_client=client)
+    assert broker.get_option_chain("NIFTY", date(2026, 9, 1)) is None
+
+
+def test_paper_broker_get_lot_size_returns_real_value():
+    client = FakeGrowwClient(instrument_response={"lot_size": "65"})
+    broker = PaperBroker(market_data_client=client)
+    assert broker.get_lot_size("NIFTY2690122000CE") == 65
+
+
+def test_live_broker_get_expiries_reauths_on_auth_exception(monkeypatch):
+    failing_client = FakeGrowwClient(expiries_raise_exc=GrowwAPIAuthenticationException())
+    new_client = FakeGrowwClient(expiries_response={"expiries": ["2026-09-01"]})
+    monkeypatch.setattr(execution_module, "get_client", lambda: new_client)
+
+    broker = LiveBroker(failing_client)
+    result = broker.get_expiries("NIFTY")
+
+    assert result == [date(2026, 9, 1)]
+    assert broker.client is new_client
+
+
+def test_live_broker_get_option_chain_reauths_on_auth_exception(monkeypatch):
+    failing_client = FakeGrowwClient(option_chain_raise_exc=GrowwAPIAuthenticationException())
+    new_client = FakeGrowwClient(option_chain_response=_REALISTIC_CHAIN_RESPONSE)
+    monkeypatch.setattr(execution_module, "get_client", lambda: new_client)
+
+    broker = LiveBroker(failing_client)
+    snapshot = broker.get_option_chain("NIFTY", date(2026, 9, 1))
+
+    assert snapshot is not None
+    assert snapshot.strikes[0].ce.trading_symbol == "NIFTY2690122000CE"
+    assert broker.client is new_client
+
+
+def test_live_broker_get_lot_size_returns_real_value():
+    client = FakeGrowwClient(instrument_response={"lot_size": "65"})
+    broker = LiveBroker(client)
+    assert broker.get_lot_size("NIFTY2690122000CE") == 65
+
+
+def test_live_broker_get_lot_size_returns_none_on_fetch_error():
+    client = FakeGrowwClient(instrument_raise_exc=RuntimeError("network down"))
+    broker = LiveBroker(client)
+    assert broker.get_lot_size("NIFTY2690122000CE") is None

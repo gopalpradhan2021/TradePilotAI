@@ -14,6 +14,15 @@ class RiskConfig:
     price_sanity_band_pct: float
     total_capital_inr: float
     allow_fno: bool
+    # Phase B (index options): a second, narrower gate on top of allow_fno — lets F&O
+    # infrastructure (margin math, symbol handling) be enabled/tested without also
+    # green-lighting the new IV/OI strategy's index-options orders specifically.
+    allow_fno_index: bool
+    # No historical option-chain data exists to run a real backtest against (see
+    # scripts/backtest.py's BACKTEST_VALIDATED gate, which this can't reuse) — this is an
+    # honestly-named substitute: true only after a stretch of PAPER-mode decide_fno()
+    # output has actually been reviewed, not a stand-in for a real backtest.
+    fno_paper_validated: bool
 
 
 @dataclass(frozen=True)
@@ -42,6 +51,8 @@ def load_settings() -> Settings:
         price_sanity_band_pct=_float_env("PRICE_SANITY_BAND_PCT", 3.0),
         total_capital_inr=_float_env("TOTAL_CAPITAL_INR", 20000),
         allow_fno=os.getenv("ALLOW_FNO", "false").strip().lower() == "true",
+        allow_fno_index=os.getenv("ALLOW_FNO_INDEX", "false").strip().lower() == "true",
+        fno_paper_validated=os.getenv("FNO_PAPER_VALIDATED", "false").strip().lower() == "true",
     )
     return Settings(
         mode=os.getenv("MODE", "PAPER").upper(),

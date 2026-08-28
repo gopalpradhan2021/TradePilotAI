@@ -14,7 +14,7 @@ from typing import Callable
 
 from config.settings import RiskConfig
 from core.db import positions_repo, risk_repo
-from core.models import ProposedOrder, RiskCheckResult, Side
+from core.models import ProposedOrder, RiskCheckResult, Segment, Side
 from core.notifier import send_notification_raw
 
 logger = logging.getLogger("groww_agent.risk")
@@ -22,7 +22,8 @@ logger = logging.getLogger("groww_agent.risk")
 
 class RiskManager:
     def __init__(self, risk_config: RiskConfig, ntfy_topic: str = "",
-                 today_fn: Callable[[], date] = date.today, mode: str = "LIVE"):
+                 today_fn: Callable[[], date] = date.today, mode: str = "LIVE",
+                 margin_provider=None):
         """today_fn defaults to the real wall-clock date; scripts/backtest.py injects a
         simulated clock instead, so day-rollover (and the daily counters it resets) tracks
         simulated historical days rather than the backtest process's real run time.
@@ -33,11 +34,17 @@ class RiskManager:
         being enforced (see check()) — paper trading risks no real money, so the cap exists
         only to make the strategy's true, unconstrained trade frequency visible for future
         tuning, not to protect anything. LIVE mode always enforces it regardless of what's
-        passed here as a defense against a mistaken/missing mode value."""
+        passed here as a defense against a mistaken/missing mode value.
+
+        margin_provider (core.margin_provider.GrowwMarginProvider, optional) sources real
+        SPAN+exposure margin for FNO orders instead of the naive price*qty math used for
+        CASH — see the FNO branch in check(). None by default so CASH-only callers (and
+        Phase B development before this is wired into main.py) are unaffected."""
         self.cfg = risk_config
         self._ntfy_topic = ntfy_topic
         self._today_fn = today_fn
         self.mode = mode
+        self._margin_provider = margin_provider
         self._current_day = self._today_fn()
         self._sync_daily_state()
 
@@ -164,24 +171,26 @@ class RiskManager:
                 f"Daily trade count limit reached ({self.cfg.max_trades_per_day})."
             )
 
+        margin_quote = None
         ref_price = order.limit_price or last_traded_price
         if ref_price is None:
             reasons.append("No reference price available to value the order — rejecting.")
         else:
-            order_value = ref_price * order.total_units
-            if order_value > self.cfg.max_order_value_inr:
+            if order.segment == Segment.FNO and self._margin_provider is not None:
+                margin_quote = self._check_fno_margin(order, reasons)
+            elif order.segment == Segment.FNO and self.mode != "PAPER":
+                # LIVE FNO with no margin_provider configured: refuse to size on notional
+                # value alone rather than silently falling back to the CASH-style
+                # price*qty math, which materially understates real F&O risk.
                 reasons.append(
-                    f"Order value ₹{order_value:.2f} exceeds cap ₹{self.cfg.max_order_value_inr}."
+                    "F&O margin check unavailable (no margin_provider configured) — "
+                    "refusing to size an FNO order on notional value alone in LIVE mode."
                 )
-
-            if order.side == Side.BUY:
-                projected_capital = self._deployed_capital + order_value
-                if projected_capital > self.cfg.total_capital_inr:
-                    reasons.append(
-                        f"Would deploy ₹{projected_capital:.2f} total, exceeding "
-                        f"total capital cap ₹{self.cfg.total_capital_inr:.2f} "
-                        f"(currently ₹{self._deployed_capital:.2f} deployed)."
-                    )
+            else:
+                # CASH (any mode), or PAPER-mode FNO with no margin_provider configured yet
+                # — falls back to the existing notional-value math so Phase B strategy
+                # development/testing doesn't require the live margin API wired in.
+                self._check_notional_value(order, ref_price, reasons)
 
             if (
                 order.order_type.value == "LIMIT"
@@ -197,11 +206,57 @@ class RiskManager:
                     )
 
         approved = len(reasons) == 0
-        result = RiskCheckResult(approved=approved, reasons=reasons)
+        result = RiskCheckResult(approved=approved, reasons=reasons, margin_quote=margin_quote)
         self._record_check_event(order_id, order, result, last_traded_price)
         if not approved:
             logger.warning("Order REJECTED by risk manager: %s | order=%s", reasons, order)
         return result
+
+    def _check_notional_value(self, order: ProposedOrder, ref_price: float, reasons: list[str]):
+        order_value = ref_price * order.total_units
+        if order_value > self.cfg.max_order_value_inr:
+            reasons.append(
+                f"Order value ₹{order_value:.2f} exceeds cap ₹{self.cfg.max_order_value_inr}."
+            )
+
+        if order.side == Side.BUY:
+            projected_capital = self._deployed_capital + order_value
+            if projected_capital > self.cfg.total_capital_inr:
+                reasons.append(
+                    f"Would deploy ₹{projected_capital:.2f} total, exceeding "
+                    f"total capital cap ₹{self.cfg.total_capital_inr:.2f} "
+                    f"(currently ₹{self._deployed_capital:.2f} deployed)."
+                )
+
+    def _check_fno_margin(self, order: ProposedOrder, reasons: list[str]):
+        """Fails CLOSED on this order only, never halts the bot — a single flaky margin-API
+        call means only this order is unsizeable this cycle; the next poll cycle retries.
+        Halting the whole bot (including an unrelated CASH strategy) over one transient F&O
+        margin-fetch hiccup would be disproportionate — unlike reconcile_positions's
+        halt-on-mismatch, where a mismatch means the whole ledger can't be trusted.
+
+        Returns the fetched MarginQuote (or None on fetch failure) so check() can attach it
+        to the RiskCheckResult — lets the orchestrator record the real margin at fill time
+        without a second API call."""
+        quote = self._margin_provider.get_order_margin(order)
+        if quote is None:
+            reasons.append(
+                "Could not fetch margin details for this order — rejecting (fail-closed; "
+                "does not halt trading, only this order)."
+            )
+            return None
+
+        if quote.required_margin > self.cfg.max_order_value_inr:
+            reasons.append(
+                f"Required margin ₹{quote.required_margin:.2f} exceeds cap "
+                f"₹{self.cfg.max_order_value_inr}."
+            )
+        if quote.required_margin > quote.available_margin:
+            reasons.append(
+                f"Required margin ₹{quote.required_margin:.2f} exceeds available broker "
+                f"margin ₹{quote.available_margin:.2f}."
+            )
+        return quote
 
     def _record_check_event(self, order_id: int, order: ProposedOrder,
                              result: RiskCheckResult, last_traded_price: float | None):

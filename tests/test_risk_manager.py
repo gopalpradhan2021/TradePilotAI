@@ -3,8 +3,21 @@ from datetime import date, timedelta
 import core.risk_manager as risk_manager_module
 from config.settings import RiskConfig
 from core.db import orders_repo, positions_repo
-from core.models import ProposedOrder, Side, OrderType, Segment
+from core.models import MarginQuote, ProposedOrder, Side, OrderType, Segment
 from core.risk_manager import RiskManager
+
+
+class FakeMarginProvider:
+    """GrowwMarginProvider.get_order_margin() never raises — it catches everything
+    internally and returns None on any fetch failure (see core/margin_provider.py).
+    This fake matches that same None-on-failure contract rather than raising."""
+    def __init__(self, quote: MarginQuote | None = None):
+        self._quote = quote
+        self.calls = []
+
+    def get_order_margin(self, order):
+        self.calls.append(order)
+        return self._quote
 
 
 def make_cfg(**overrides):
@@ -16,6 +29,8 @@ def make_cfg(**overrides):
         price_sanity_band_pct=3.0,
         total_capital_inr=1_000_000,
         allow_fno=False,
+        allow_fno_index=False,
+        fno_paper_validated=False,
     )
     defaults.update(overrides)
     return RiskConfig(**defaults)
@@ -49,7 +64,10 @@ def test_fno_rejected_when_not_allowed():
 
 
 def test_fno_allowed_when_enabled():
-    rm = RiskManager(make_cfg(allow_fno=True, max_position_qty=100))
+    # PAPER mode, no margin_provider: falls back to the naive notional-value math (same
+    # as CASH) so this test stays focused on the allow_fno gate itself, not margin sizing
+    # — see test_risk_manager.py's FNO-margin-specific tests for that.
+    rm = RiskManager(make_cfg(allow_fno=True, max_position_qty=100), mode="PAPER")
     order = make_order(segment=Segment.FNO, lot_size=50, qty=1)
     result = check(rm, order, ltp=100.0)
     assert result.approved
@@ -69,6 +87,72 @@ def test_max_position_qty_uses_total_units_not_qty():
     result = check(rm, order, ltp=10.0)
     assert not result.approved
     assert any("exceeds max_position_qty" in r for r in result.reasons)
+
+
+# --- FNO margin-aware sizing (Phase A) -------------------------------------
+
+def test_fno_live_rejected_when_no_margin_provider_configured():
+    rm = RiskManager(make_cfg(allow_fno=True, max_position_qty=100), mode="LIVE")
+    order = make_order(segment=Segment.FNO, lot_size=50, qty=1)
+    result = check(rm, order, ltp=100.0)
+    assert not result.approved
+    assert any("margin check unavailable" in r for r in result.reasons)
+
+
+def test_fno_paper_falls_back_to_notional_when_no_margin_provider_configured():
+    rm = RiskManager(make_cfg(allow_fno=True, max_position_qty=100), mode="PAPER")
+    order = make_order(segment=Segment.FNO, lot_size=50, qty=1)
+    result = check(rm, order, ltp=100.0)
+    assert result.approved
+    assert result.margin_quote is None
+
+
+def test_fno_approved_when_margin_within_caps():
+    quote = MarginQuote(required_margin=5_000, available_margin=50_000)
+    rm = RiskManager(
+        make_cfg(allow_fno=True, max_position_qty=100, max_order_value_inr=10_000),
+        margin_provider=FakeMarginProvider(quote=quote),
+    )
+    order = make_order(segment=Segment.FNO, lot_size=50, qty=1)
+    result = check(rm, order, ltp=100.0)
+    assert result.approved
+    assert result.margin_quote == quote
+
+
+def test_fno_rejected_when_required_margin_exceeds_cap():
+    quote = MarginQuote(required_margin=20_000, available_margin=50_000)
+    rm = RiskManager(
+        make_cfg(allow_fno=True, max_position_qty=100, max_order_value_inr=10_000),
+        margin_provider=FakeMarginProvider(quote=quote),
+    )
+    order = make_order(segment=Segment.FNO, lot_size=50, qty=1)
+    result = check(rm, order, ltp=100.0)
+    assert not result.approved
+    assert any("Required margin" in r and "exceeds cap" in r for r in result.reasons)
+
+
+def test_fno_rejected_when_required_margin_exceeds_available_broker_margin():
+    quote = MarginQuote(required_margin=5_000, available_margin=1_000)
+    rm = RiskManager(
+        make_cfg(allow_fno=True, max_position_qty=100, max_order_value_inr=10_000),
+        margin_provider=FakeMarginProvider(quote=quote),
+    )
+    order = make_order(segment=Segment.FNO, lot_size=50, qty=1)
+    result = check(rm, order, ltp=100.0)
+    assert not result.approved
+    assert any("exceeds available broker margin" in r for r in result.reasons)
+
+
+def test_fno_rejected_when_margin_fetch_fails_does_not_halt():
+    rm = RiskManager(
+        make_cfg(allow_fno=True, max_position_qty=100),
+        margin_provider=FakeMarginProvider(quote=None),
+    )
+    order = make_order(segment=Segment.FNO, lot_size=50, qty=1)
+    result = check(rm, order, ltp=100.0)
+    assert not result.approved
+    assert any("Could not fetch margin details" in r for r in result.reasons)
+    assert not rm.halted  # fails closed on this order only — never halts the bot
 
 
 def test_daily_trade_count_cap():
