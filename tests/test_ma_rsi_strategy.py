@@ -144,8 +144,8 @@ def test_no_buy_when_crossover_gap_below_min_threshold(monkeypatch):
     _patch_indicators(monkeypatch, short_ma=100.0, long_ma=100.0, rsi=50)
     strategy.decide("RELIANCE", 100.0)
 
-    # gap = 0.03%, below MIN_CROSSOVER_GAP_PCT (0.05%)
-    _patch_indicators(monkeypatch, short_ma=100.03, long_ma=100.0, rsi=55)
+    # gap = 0.01%, below MIN_CROSSOVER_GAP_PCT (0.02%)
+    _patch_indicators(monkeypatch, short_ma=100.01, long_ma=100.0, rsi=55)
     order = strategy.decide("RELIANCE", 100.0)
 
     assert order is None
@@ -158,8 +158,8 @@ def test_buy_fires_when_crossover_gap_at_or_above_min_threshold(monkeypatch):
     _patch_indicators(monkeypatch, short_ma=100.0, long_ma=100.0, rsi=50)
     strategy.decide("RELIANCE", 100.0)
 
-    # gap = 0.06%, at/above MIN_CROSSOVER_GAP_PCT (0.05%)
-    _patch_indicators(monkeypatch, short_ma=100.06, long_ma=100.0, rsi=55)
+    # gap = 0.03%, at/above MIN_CROSSOVER_GAP_PCT (0.02%)
+    _patch_indicators(monkeypatch, short_ma=100.03, long_ma=100.0, rsi=55)
     order = strategy.decide("RELIANCE", 100.0)
 
     assert order is not None
@@ -170,8 +170,8 @@ def test_no_sell_via_crossover_when_gap_below_min_threshold(monkeypatch):
     strategy = MARsiStrategy()
     _enter_position(strategy, monkeypatch, entry_price=100.0)
 
-    # gap = 0.03%, below threshold; RSI healthy, price above stop-loss
-    _patch_indicators(monkeypatch, short_ma=100.0, long_ma=100.03, rsi=50)
+    # gap = 0.01%, below threshold; RSI healthy, price above stop-loss
+    _patch_indicators(monkeypatch, short_ma=100.0, long_ma=100.01, rsi=50)
     order = strategy.decide("RELIANCE", 99.5)
 
     assert order is None

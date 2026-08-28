@@ -24,7 +24,11 @@ logger = logging.getLogger("groww_agent.strategy.ma_rsi")
 SHORT_WINDOW = 9
 LONG_WINDOW = 21
 RSI_WINDOW = 14
-RSI_ENTRY_MIN = 40
+# Entry floor lowered from 40 (2026-08-28) to admit trades recovering from a
+# dip rather than only ones already mid-uptrend — ceiling stays at 70, well
+# clear of RSI_EXIT_OVERBOUGHT (75), so an entry is never one tick from its
+# own exit trigger.
+RSI_ENTRY_MIN = 30
 RSI_ENTRY_MAX = 70
 RSI_EXIT_OVERBOUGHT = 75
 STOP_LOSS_PCT = 2.0
@@ -32,9 +36,11 @@ DEFAULT_ORDER_QTY = 1
 
 # Minimum relative gap between short/long MA required to count as a real
 # crossover, not sub-tick price noise. Noise floor observed live on
-# 2026-08-26 was ~0.0008% (RELIANCE oscillating 1304-1307); this is ~60x
-# that floor, still well under RELIANCE's ~0.2% daily range.
-MIN_CROSSOVER_GAP_PCT = 0.0005
+# 2026-08-26 was ~0.0008% (RELIANCE oscillating 1304-1307). Lowered from
+# 0.0005 (~60x that floor) to 0.0002 (2026-08-28) to catch more real
+# crossovers after a quiet first two live days produced almost no trades;
+# still ~25x the observed noise floor.
+MIN_CROSSOVER_GAP_PCT = 0.0002
 
 # Minimum wall-clock time after closing a position before a new entry is
 # allowed — kills the sub-minute flip-flops seen live (5s, 20s holds).
