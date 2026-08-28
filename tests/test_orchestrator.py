@@ -1,10 +1,11 @@
 import time
+from datetime import date, datetime
 
 import core.orchestrator as orchestrator_module
 from config.settings import RiskConfig, Settings
 from core.db import orders_repo, positions_repo
 from core.execution import BrokerPositionFetchError, PaperBroker
-from core.models import ProposedOrder, ExecutionResult, Side, OrderType
+from core.models import OptionChainSnapshot, ProposedOrder, ExecutionResult, Segment, Side, OrderType
 from core.orchestrator import Orchestrator
 from core.risk_manager import RiskManager
 from strategies.base_strategy import BaseStrategy
@@ -19,6 +20,8 @@ def make_settings(mode="PAPER", **risk_overrides):
         price_sanity_band_pct=3.0,
         total_capital_inr=1_000_000,
         allow_fno=False,
+        allow_fno_index=False,
+        fno_paper_validated=False,
     )
     defaults.update(risk_overrides)
     return Settings(mode=mode, risk=RiskConfig(**defaults), ntfy_topic="")
@@ -546,3 +549,173 @@ def test_stale_notification_fires_once_not_every_cycle(monkeypatch):
 
     assert len(calls) == 1
     assert "stale" in calls[0].lower()
+
+
+# --- F&O cycle (Phase B): run_once_fno / _maybe_run_fno_cycle -------------
+
+def make_fno_order(symbol="NIFTY26SEP24000CE", qty=1, lot_size=75):
+    return ProposedOrder(
+        symbol=symbol, underlying_symbol="NIFTY", side=Side.BUY, qty=qty,
+        order_type=OrderType.MARKET, segment=Segment.FNO, lot_size=lot_size,
+    )
+
+
+def make_chain(underlying="NIFTY", underlying_ltp=24000.0, strikes=None):
+    return OptionChainSnapshot(
+        underlying=underlying, underlying_ltp=underlying_ltp, expiry_date=date(2026, 9, 1),
+        fetched_at=datetime(2026, 8, 28, 10, 0), strikes=strikes or [],
+    )
+
+
+def make_matching_strike(trading_symbol="NIFTY26SEP24000CE", strike=24000.0, ltp=200.0):
+    """A StrikeQuote whose CE trading_symbol matches make_fno_order()'s default symbol —
+    lets tests exercise chain.find_quote()'s contract-premium lookup realistically."""
+    from core.models import OptionGreeks, OptionQuote, StrikeQuote
+    return StrikeQuote(
+        strike=strike,
+        ce=OptionQuote(
+            trading_symbol=trading_symbol, ltp=ltp, open_interest=1000, volume=100,
+            greeks=OptionGreeks(delta=0.5, gamma=0.0, theta=0.0, vega=0.0, rho=0.0, iv=20.0),
+        ),
+        pe=None,
+    )
+
+
+class ScriptedFnoStrategy(BaseStrategy):
+    """Returns each order in `orders` in sequence (by underlying), then None forever."""
+
+    def __init__(self, orders_by_underlying: dict[str, list[ProposedOrder | None]]):
+        self._queues = {k: list(v) for k, v in orders_by_underlying.items()}
+        self.decide_fno_calls = []
+
+    def decide_fno(self, underlying, chain):
+        self.decide_fno_calls.append((underlying, chain))
+        queue = self._queues.get(underlying, [])
+        return queue.pop(0) if queue else None
+
+
+class StubFnoMarketData:
+    def __init__(self, chain_by_underlying: dict[str, OptionChainSnapshot | None]):
+        self._chains = chain_by_underlying
+        self.calls = []
+
+    def get_chain(self, underlying):
+        self.calls.append(underlying)
+        return self._chains.get(underlying)
+
+
+def test_fno_buy_order_flows_through_the_same_risk_and_execution_pipeline_as_cash():
+    settings = make_settings(allow_fno=True, allow_fno_index=True)
+    risk_manager = RiskManager(settings.risk, mode="PAPER")  # PAPER: no margin_provider needed
+    broker = FixedPriceBroker(price=200.0)
+    fno_strategy = ScriptedFnoStrategy({"NIFTY": [make_fno_order()]})
+    chain = make_chain(strikes=[make_matching_strike(ltp=200.0)])
+    fno_market_data = StubFnoMarketData({"NIFTY": chain})
+    orchestrator = Orchestrator(settings, broker, risk_manager, ScriptedStrategy({}),
+                                 fno_strategy=fno_strategy, fno_market_data=fno_market_data)
+
+    orchestrator.run_once_fno(["NIFTY"])
+
+    assert fno_market_data.calls == ["NIFTY"]
+    orders = orders_repo.get_recent_orders(10)
+    assert len(orders) == 1
+    assert orders[0]["status"] == "FILLED"
+    assert orders[0]["fill_price"] == 200.0  # the contract's own premium, not underlying_ltp
+    assert orders[0]["segment"] == "FNO"
+
+    position = positions_repo.get_open_position("NIFTY26SEP24000CE")
+    assert position is not None
+    assert position["segment"] == "FNO"
+    assert position["entry_price"] == 200.0
+
+
+def test_fno_order_rejected_by_risk_manager_does_not_open_a_position():
+    # allow_fno_index left False -> risk_manager.check() rejects every FNO order, proving
+    # decide_fno()'s output still goes through the same gate CASH orders do, not a bypass.
+    settings = make_settings(allow_fno=False)
+    risk_manager = RiskManager(settings.risk, mode="PAPER")
+    broker = FixedPriceBroker(price=200.0)
+    fno_strategy = ScriptedFnoStrategy({"NIFTY": [make_fno_order()]})
+    fno_market_data = StubFnoMarketData({"NIFTY": make_chain()})
+    orchestrator = Orchestrator(settings, broker, risk_manager, ScriptedStrategy({}),
+                                 fno_strategy=fno_strategy, fno_market_data=fno_market_data)
+
+    orchestrator.run_once_fno(["NIFTY"])
+
+    orders = orders_repo.get_recent_orders(10)
+    assert len(orders) == 1
+    assert orders[0]["status"] == "BLOCKED"
+    assert positions_repo.get_open_position("NIFTY26SEP24000CE") is None
+
+
+def test_run_once_fno_skips_underlyings_with_no_chain_available():
+    settings = make_settings(allow_fno=True, allow_fno_index=True)
+    risk_manager = RiskManager(settings.risk, mode="PAPER")
+    broker = FixedPriceBroker(price=200.0)
+    fno_strategy = ScriptedFnoStrategy({"NIFTY": [make_fno_order()]})
+    fno_market_data = StubFnoMarketData({"NIFTY": None})  # chain fetch "failed"
+    orchestrator = Orchestrator(settings, broker, risk_manager, ScriptedStrategy({}),
+                                 fno_strategy=fno_strategy, fno_market_data=fno_market_data)
+
+    orchestrator.run_once_fno(["NIFTY"])
+
+    assert fno_strategy.decide_fno_calls == []  # never even consulted without a chain
+    assert orders_repo.get_recent_orders(10) == []
+
+
+def test_fno_cycle_is_a_no_op_when_no_fno_strategy_configured():
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk, mode="PAPER")
+    broker = FixedPriceBroker(price=100.0)
+    orchestrator = Orchestrator(settings, broker, risk_manager, ScriptedStrategy({}))
+
+    # Should not raise even though fno_strategy/fno_market_data are both None
+    orchestrator.run_once(symbols=[], fno_underlyings=["NIFTY"])
+
+
+def test_fno_cycle_does_not_fire_immediately_after_construction():
+    # Mirrors _maybe_reconcile's own deliberate design: the clock starts at construction,
+    # so the very first cycle right after startup doesn't fire either.
+    settings = make_settings(allow_fno=True, allow_fno_index=True)
+    risk_manager = RiskManager(settings.risk, mode="PAPER")
+    broker = FixedPriceBroker(price=200.0)
+    fno_strategy = ScriptedFnoStrategy({})
+    fno_market_data = StubFnoMarketData({"NIFTY": make_chain()})
+    orchestrator = Orchestrator(settings, broker, risk_manager, ScriptedStrategy({}),
+                                 fno_strategy=fno_strategy, fno_market_data=fno_market_data)
+
+    orchestrator.run_once(symbols=[], fno_underlyings=["NIFTY"])
+
+    assert fno_market_data.calls == []
+
+
+def test_fno_cycle_gated_to_at_most_once_per_interval():
+    settings = make_settings(allow_fno=True, allow_fno_index=True)
+    risk_manager = RiskManager(settings.risk, mode="PAPER")
+    broker = FixedPriceBroker(price=200.0)
+    fno_strategy = ScriptedFnoStrategy({})
+    fno_market_data = StubFnoMarketData({"NIFTY": make_chain()})
+    orchestrator = Orchestrator(settings, broker, risk_manager, ScriptedStrategy({}),
+                                 fno_strategy=fno_strategy, fno_market_data=fno_market_data)
+    orchestrator._last_fno_cycle_time = time.monotonic() - 9999
+
+    orchestrator.run_once(symbols=[], fno_underlyings=["NIFTY"])
+    orchestrator.run_once(symbols=[], fno_underlyings=["NIFTY"])
+    orchestrator.run_once(symbols=[], fno_underlyings=["NIFTY"])
+
+    assert len(fno_market_data.calls) == 1  # only the first call actually ran the FNO cycle
+
+
+def test_fno_cycle_fires_again_after_interval_elapses():
+    settings = make_settings(allow_fno=True, allow_fno_index=True)
+    risk_manager = RiskManager(settings.risk, mode="PAPER")
+    broker = FixedPriceBroker(price=200.0)
+    fno_strategy = ScriptedFnoStrategy({})
+    fno_market_data = StubFnoMarketData({"NIFTY": make_chain()})
+    orchestrator = Orchestrator(settings, broker, risk_manager, ScriptedStrategy({}),
+                                 fno_strategy=fno_strategy, fno_market_data=fno_market_data)
+    orchestrator._last_fno_cycle_time = time.monotonic() - 9999
+
+    orchestrator.run_once(symbols=[], fno_underlyings=["NIFTY"])
+
+    assert len(fno_market_data.calls) == 1

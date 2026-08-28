@@ -21,7 +21,9 @@ def _heartbeat_path() -> str:
 
 def write_heartbeat(*, mode: str, halted: bool, halt_reason: str,
                      symbols: list[str], last_ltp: dict[str, float | None],
-                     strategy_debug: dict | None = None) -> None:
+                     strategy_debug: dict | None = None,
+                     fno_underlyings: list[str] | None = None,
+                     fno_strategy_debug: dict | None = None) -> None:
     path = _heartbeat_path()
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     payload = {
@@ -32,6 +34,12 @@ def write_heartbeat(*, mode: str, halted: bool, halt_reason: str,
         "symbols": symbols,
         "last_ltp": last_ltp,
         "strategy_debug": strategy_debug or {},
+        # Kept as a separate namespace from strategy_debug/symbols — an FNO underlying
+        # (e.g. "RELIANCE" once Phase C adds single-stock F&O) can share a name with a
+        # CASH symbol, so merging them into one dict risked one silently overwriting the
+        # other's debug info.
+        "fno_underlyings": fno_underlyings or [],
+        "fno_strategy_debug": fno_strategy_debug or {},
     }
     dir_name = os.path.dirname(path) or "."
     fd, tmp_path = tempfile.mkstemp(dir=dir_name)
@@ -56,8 +64,12 @@ def read_heartbeat() -> dict:
             "symbols": [],
             "last_ltp": {},
             "strategy_debug": {},
+            "fno_underlyings": [],
+            "fno_strategy_debug": {},
         }
     with open(path) as f:
         payload = json.load(f)
     payload.setdefault("strategy_debug", {})  # older heartbeat files predate this field
+    payload.setdefault("fno_underlyings", [])
+    payload.setdefault("fno_strategy_debug", {})
     return payload

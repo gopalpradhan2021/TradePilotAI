@@ -1,15 +1,25 @@
 """
-Strategy interface. Implement `decide()` and return either a ProposedOrder
-or None (no action this cycle).
+Strategy interface. A strategy implements decide() (CASH), decide_fno() (F&O), or both,
+returning a ProposedOrder or None (no action this cycle) either way.
+
+Neither method is abstract: a CASH-only strategy (MARsiStrategy) needs only decide();
+an F&O-only strategy (IvOiStrategy) needs only decide_fno(). Both default to a no-op so
+a strategy implementing just one isn't forced to stub out the other.
 """
-from abc import ABC, abstractmethod
-from core.models import ProposedOrder
+from abc import ABC
+from core.models import OptionChainSnapshot, ProposedOrder
 
 
 class BaseStrategy(ABC):
-    @abstractmethod
     def decide(self, symbol: str, last_traded_price: float | None) -> ProposedOrder | None:
-        ...
+        return None
+
+    def decide_fno(self, underlying: str, chain: OptionChainSnapshot) -> ProposedOrder | None:
+        """F&O counterpart to decide() — takes a full option-chain snapshot (IV, OI,
+        Greeks per strike) instead of a single LTP float, since that's the minimum an
+        options strategy actually needs. Pure market data, no broker/account reference —
+        keeps this exactly as broker-agnostic as decide() already is."""
+        return None
 
     def restore_position(self, symbol: str, entry_price: float) -> None:
         """Optional: called once per symbol at startup if positions_repo shows an
