@@ -38,15 +38,20 @@ class Orchestrator:
     # enough that a real feed outage doesn't go unnoticed for long.
     _STALE_DATA_THRESHOLD_SEC = 120
 
-    # Option-chain fetches are heavier than a single LTP call, and IV/OI/Greeks don't need
-    # per-tick (5s) granularity the way a crossover signal does — gated separately from the
-    # CASH poll interval, similar in spirit to _RECONCILE_INTERVAL_SEC.
-    _FNO_POLL_INTERVAL_SEC = 30
+    # Groww's documented "Live Data" API category (quotes, LTP, OHLC, option chain — all of
+    # it, rate-limited together, not per-endpoint) allows 10 req/s / 300 req/min. The CASH
+    # LTP loop alone already spends ~180 of those 300 calls/min (15 symbols x 12 cycles/min
+    # at the 5s poll interval) without issue, so 5s is a real, already-proven-safe floor for
+    # this cadence too, not an arbitrary guess — matching it (rather than going faster than
+    # CASH's own tick loop) keeps IV/OI/Greeks warmup as fast as the rate budget reasonably
+    # allows: 2 underlyings x 12 cycles/min = 24 more calls/min, well inside the remaining
+    # ~120/min headroom even accounting for jitter/overlap with the CASH loop's own bursts.
+    _FNO_POLL_INTERVAL_SEC = 5
 
     # Candle fetches (broker.get_recent_candles()) are heavier than a single LTP call, and
     # MA/RSI trend signals don't need per-tick (5s) granularity — that granularity is exactly
     # what caused the noise problem candles replace. Coarser than _FNO_POLL_INTERVAL_SEC since
-    # even the shortest supported candle interval (1minute) is still much wider than 30s.
+    # even the shortest supported candle interval (1minute) is still much wider than 5s.
     _CANDLE_FETCH_INTERVAL_SEC = 60
 
     def __init__(self, settings: Settings, broker, risk_manager, strategy,
