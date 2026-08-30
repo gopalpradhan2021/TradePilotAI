@@ -160,7 +160,13 @@ class RiskManager:
         if order.qty <= 0:
             reasons.append("Quantity must be positive.")
 
-        if order.total_units > self.cfg.max_position_qty:
+        # Entry-sizing gate — only applies to new exposure (BUY). A SELL closing a real
+        # position must never be blocked by it: qty is fixed at whatever was actually
+        # bought, and refusing to let a position close because it's "too big" would trap
+        # it open indefinitely (found live via a nightly-optimize crash: a SELL rejected
+        # here left the strategy's internal state believing it was flat while the real
+        # position stayed OPEN in the DB, so the next BUY signal collided with it).
+        if order.side == Side.BUY and order.total_units > self.cfg.max_position_qty:
             reasons.append(
                 f"Total units {order.total_units} (qty {order.qty} x lot {order.lot_size}) "
                 f"exceeds max_position_qty {self.cfg.max_position_qty}."
@@ -213,20 +219,27 @@ class RiskManager:
         return result
 
     def _check_notional_value(self, order: ProposedOrder, ref_price: float, reasons: list[str]):
+        # Both checks here gate NEW exposure — BUY only. A SELL closes whatever qty is
+        # actually held; its notional value can legitimately exceed the entry-time value
+        # cap purely because price moved up since entry, and must never be blocked for
+        # that reason (same "always allow closing a real position" principle as the
+        # max_position_qty check in check() above — see its comment for the live incident
+        # that surfaced this).
+        if order.side != Side.BUY:
+            return
         order_value = ref_price * order.total_units
         if order_value > self.cfg.max_order_value_inr:
             reasons.append(
                 f"Order value ₹{order_value:.2f} exceeds cap ₹{self.cfg.max_order_value_inr}."
             )
 
-        if order.side == Side.BUY:
-            projected_capital = self._deployed_capital + order_value
-            if projected_capital > self.cfg.total_capital_inr:
-                reasons.append(
-                    f"Would deploy ₹{projected_capital:.2f} total, exceeding "
-                    f"total capital cap ₹{self.cfg.total_capital_inr:.2f} "
-                    f"(currently ₹{self._deployed_capital:.2f} deployed)."
-                )
+        projected_capital = self._deployed_capital + order_value
+        if projected_capital > self.cfg.total_capital_inr:
+            reasons.append(
+                f"Would deploy ₹{projected_capital:.2f} total, exceeding "
+                f"total capital cap ₹{self.cfg.total_capital_inr:.2f} "
+                f"(currently ₹{self._deployed_capital:.2f} deployed)."
+            )
 
     def _check_fno_margin(self, order: ProposedOrder, reasons: list[str]):
         """Fails CLOSED on this order only, never halts the bot — a single flaky margin-API

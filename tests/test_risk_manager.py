@@ -207,6 +207,43 @@ def test_sell_orders_not_subject_to_capital_cap():
     assert result.approved
 
 
+def test_sell_orders_not_subject_to_order_value_cap():
+    # A real bug found live via a nightly-optimize crash: capital-aware position sizing
+    # (core/position_sizing.py) now resizes SELL qty to the REAL held quantity, so if
+    # price rose since entry, order_value = price * qty can exceed the same
+    # max_order_value_inr cap that sized the entry. A SELL closing a real position must
+    # never be blocked by that — refusing to let a position close because it's grown
+    # "too valuable" would trap it open indefinitely.
+    rm = RiskManager(make_cfg(max_order_value_inr=500, total_capital_inr=100_000))
+    # qty=15 at ltp=100 -> order_value=1500, well over the 500 cap, but it's a SELL.
+    result = check(rm, make_order(side=Side.SELL, qty=15), ltp=100.0)
+    assert result.approved
+
+
+def test_sell_orders_not_subject_to_max_position_qty():
+    # Same principle as the value-cap exemption above, for the max_position_qty check —
+    # a SELL must be able to close a position even if it's larger than the current cap
+    # (e.g. the cap was tightened in .env after the position was opened).
+    rm = RiskManager(make_cfg(max_position_qty=5, max_order_value_inr=100_000))
+    result = check(rm, make_order(side=Side.SELL, qty=15), ltp=100.0)
+    assert result.approved
+    assert not any("exceeds max_position_qty" in r for r in result.reasons)
+
+
+def test_buy_orders_still_subject_to_order_value_cap_and_max_position_qty():
+    # Confirms the SELL exemptions above didn't accidentally widen to BUY too — new
+    # exposure must still be gated by both caps.
+    rm = RiskManager(make_cfg(max_order_value_inr=500, max_position_qty=1_000,
+                               total_capital_inr=100_000))
+    value_result = check(rm, make_order(side=Side.BUY, qty=15, symbol="A"), ltp=100.0)
+    assert not value_result.approved
+
+    rm2 = RiskManager(make_cfg(max_position_qty=5, max_order_value_inr=100_000,
+                                total_capital_inr=100_000))
+    qty_result = check(rm2, make_order(side=Side.BUY, qty=15, symbol="B"), ltp=100.0)
+    assert not qty_result.approved
+
+
 def test_no_reference_price_rejected():
     rm = RiskManager(make_cfg())
     result = check(rm, make_order(), ltp=None)
