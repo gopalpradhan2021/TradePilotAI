@@ -27,7 +27,16 @@ class ReplayMarketDataClient:
         self._candles = candles_by_symbol
         self._index = {symbol: 0 for symbol in candles_by_symbol}
 
-    def get_quote(self, exchange, segment, trading_symbol):
+    def get_quote(self, exchange, segment, trading_symbol, **kwargs):
+        # **kwargs absorbs `timeout` (GROWW_API_TIMEOUT_SEC, now passed on every real
+        # PaperBroker.get_ltp() call — see core/execution.py). Found live 2026-08-31: without
+        # this, every call TypeErrors on the unexpected kwarg BEFORE this body ever runs —
+        # caught by PaperBroker.get_ltp()'s broad except-Exception, so no crash, but the
+        # `self._index[trading_symbol] = idx + 1` line below never executes either. That's
+        # not just a silently-failed LTP fetch: the replay index never advances, so
+        # has_more() stays True forever and run_backtest()'s `while` loop never terminates —
+        # a genuine infinite loop, not just a slow one (surfaced as a 3+ hour stall on the
+        # live droplet and an unbounded hang in CI before this fix).
         candles = self._candles.get(trading_symbol, [])
         idx = self._index.get(trading_symbol, 0)
         if idx >= len(candles):
@@ -52,7 +61,7 @@ class ReplayMarketDataClient:
         return self._index.get(symbol, 0)
 
     def get_historical_candles(self, exchange, segment, groww_symbol, start_time, end_time,
-                                candle_interval):
+                                candle_interval, **kwargs):
         """Shim for PaperBroker.get_recent_candles() during backtest/replay. Ignores every
         kwarg except which symbol (groww_symbol is "NSE-<symbol>", matching how
         PaperBroker.get_recent_candles() and scripts/backtest.py both construct it) — serves
@@ -60,6 +69,13 @@ class ReplayMarketDataClient:
         i.e. strictly no lookahead into the bar about to be served this cycle or beyond. This
         deliberately mirrors live behavior, where a periodic candle-fetch only ever sees
         already-closed candles while the live LTP ticks inside the next forming bar.
+
+        The trailing **kwargs absorbs `timeout` (GROWW_API_TIMEOUT_SEC, now passed on every
+        real call site — see core/execution.py) so this fake doesn't TypeError on it. Found
+        live 2026-08-31: without this, every single candle fetch during a backtest/nightly-
+        optimize run raised (caught by PaperBroker's broad except-Exception, so it failed
+        silently rather than crashing) — turning what should be instant into something with
+        real, compounding per-call overhead across every bar of every symbol.
 
         Returns the same raw {"candles": [[iso_ts, o, h, l, c, v], ...]} shape Groww's real API
         returns, so PaperBroker's own _parse_candles() path is exercised identically in both
