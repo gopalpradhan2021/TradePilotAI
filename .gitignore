@@ -6,3 +6,4 @@ logs/
 data/
 backups/
 .claude/
+graphify-out/
