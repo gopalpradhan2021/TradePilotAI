@@ -872,6 +872,30 @@ def test_candle_update_calls_strategy_update_candles_with_fetched_data():
     assert strategy.update_calls == [("RELIANCE", candles)]
 
 
+def test_candle_update_staggers_calls_with_a_delay_between_symbols(monkeypatch):
+    # Found live 2026-08-31: firing all N candle fetches back-to-back with zero delay
+    # could burst past Groww's per-second rate limit (shared with the CASH LTP loop),
+    # causing repeated "Rate limit has breached" errors. A small stagger between calls
+    # keeps any 1-second window well under the limit.
+    sleep_calls = []
+    monkeypatch.setattr(orchestrator_module.time, "sleep", lambda s: sleep_calls.append(s))
+
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    strategy = CandleAwareStrategy()
+    broker = CandleBroker(price=100.0, candles_by_symbol={
+        "RELIANCE": [{"close": 100.0}], "TCS": [{"close": 200.0}], "INFY": [{"close": 300.0}],
+    })
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+    orchestrator._last_candle_fetch_time = time.monotonic() - 9999
+
+    orchestrator.run_once(symbols=["RELIANCE", "TCS", "INFY"])
+
+    # 3 symbols -> 2 stagger delays (none before the first symbol's own fetch).
+    assert sleep_calls == [Orchestrator._CANDLE_FETCH_STAGGER_SEC] * 2
+    assert len(broker.candle_calls) == 3
+
+
 def test_candle_update_skips_symbol_on_fetch_none_without_crashing():
     settings = make_settings()
     risk_manager = RiskManager(settings.risk)

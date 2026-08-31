@@ -684,3 +684,45 @@ def test_live_broker_get_recent_candles_returns_none_on_fetch_error():
     client = FakeGrowwClient(candles_raise_exc=RuntimeError("network down"))
     broker = LiveBroker(client)
     assert broker.get_recent_candles("RELIANCE", interval="5minute", lookback_bars=10) is None
+
+
+# --- SDK call timeout (fixes a live 3-hour hang, 2026-08-31) --------------
+#
+# growwapi methods default to timeout=None (infinite). Every call site must pass
+# GROWW_API_TIMEOUT_SEC explicitly — spot-check a representative sample of PaperBroker/
+# LiveBroker methods rather than every single one, since they all follow the same pattern.
+
+def test_paper_broker_get_ltp_passes_timeout():
+    client = FakeGrowwClient()
+    broker = PaperBroker(market_data_client=client)
+    broker.get_ltp("RELIANCE")
+    assert client.quote_calls[0]["timeout"] == execution_module.GROWW_API_TIMEOUT_SEC
+
+
+def test_paper_broker_get_recent_candles_passes_timeout(monkeypatch):
+    monkeypatch.setattr(execution_module, "datetime", _FixedNow)
+    client = FakeGrowwClient(candles_response=_REALISTIC_CANDLES_RESPONSE)
+    broker = PaperBroker(market_data_client=client)
+    broker.get_recent_candles("RELIANCE", interval="5minute", lookback_bars=10)
+    assert client.candles_calls[0]["timeout"] == execution_module.GROWW_API_TIMEOUT_SEC
+
+
+def test_live_broker_get_ltp_passes_timeout():
+    client = FakeGrowwClient()
+    broker = LiveBroker(client)
+    broker.get_ltp("RELIANCE")
+    assert client.quote_calls[0]["timeout"] == execution_module.GROWW_API_TIMEOUT_SEC
+
+
+def test_live_broker_place_order_passes_timeout():
+    client = FakeGrowwClient()
+    broker = LiveBroker(client)
+    broker.place_order(make_order(), last_traded_price=150.0)
+    assert client.calls[0]["timeout"] == execution_module.GROWW_API_TIMEOUT_SEC
+
+
+def test_live_broker_get_recent_candles_passes_timeout():
+    client = FakeGrowwClient(candles_response=_REALISTIC_CANDLES_RESPONSE)
+    broker = LiveBroker(client)
+    broker.get_recent_candles("RELIANCE", interval="5minute", lookback_bars=10)
+    assert client.candles_calls[0]["timeout"] == execution_module.GROWW_API_TIMEOUT_SEC

@@ -54,6 +54,10 @@ class Orchestrator:
     # even the shortest supported candle interval (1minute) is still much wider than 5s.
     _CANDLE_FETCH_INTERVAL_SEC = 60
 
+    # Delay between successive symbols' candle fetches within one _maybe_update_candles()
+    # pass — see the comment at its call site for why (a real live rate-limit incident).
+    _CANDLE_FETCH_STAGGER_SEC = 0.2
+
     def __init__(self, settings: Settings, broker, risk_manager, strategy,
                  fno_strategy=None, fno_market_data=None,
                  clock: Callable[[], float] | None = None):
@@ -135,7 +139,16 @@ class Orchestrator:
         if now - self._last_candle_fetch_time < self._CANDLE_FETCH_INTERVAL_SEC:
             return
         self._last_candle_fetch_time = now
-        for symbol in symbols:
+        for i, symbol in enumerate(symbols):
+            # Staggered, not back-to-back: found live 2026-08-31 that firing all N candle
+            # fetches with zero delay between them (previously the case here) can burst past
+            # Groww's "Live Data" API category's per-second rate limit (shared with the CASH
+            # LTP loop) — repeated "Rate limit has breached" errors on candle fetches
+            # specifically. 0.2s between calls keeps any 1-second window to ~5 of these
+            # calls, comfortably under the limit even overlapping with the LTP loop's own
+            # calls. Skipped before the first call — no need to delay entering the loop.
+            if i > 0:
+                time.sleep(self._CANDLE_FETCH_STAGGER_SEC)
             candles = self.broker.get_recent_candles(symbol, interval=interval, lookback_bars=lookback_bars)
             if candles is None:
                 logger.warning("%s: candle fetch failed this cycle — keeping existing series.", symbol)

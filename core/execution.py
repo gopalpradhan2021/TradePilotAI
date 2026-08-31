@@ -21,6 +21,15 @@ from core.models import (
 
 logger = logging.getLogger("groww_agent.execution")
 
+# growwapi's own SDK methods all accept an optional `timeout` kwarg that defaults to None
+# (infinite) — confirmed live 2026-08-31: after Groww's rate limiter stopped fast-failing
+# with 429s and instead just stopped responding to one request, that single call blocked
+# the entire single-threaded orchestrator loop for 3+ hours (no logs, no heartbeat, process
+# alive but completely stuck) since nothing here ever passed an explicit timeout. Every SDK
+# call below must pass GROWW_API_TIMEOUT_SEC — a hung/slow response should raise (caught by
+# the existing except blocks, logged, cycle continues), never block forever.
+GROWW_API_TIMEOUT_SEC = 10
+
 
 def _derive_order_reference_id(idempotency_key: str) -> str:
     """Groww's SDK defaults order_reference_id to a random 8-digit numeric string when none
@@ -232,6 +241,7 @@ class PaperBroker(Broker):
                 exchange=self._market_data_client.EXCHANGE_NSE,
                 segment=_groww_segment(self._market_data_client, segment),
                 trading_symbol=symbol,
+                timeout=GROWW_API_TIMEOUT_SEC,
             )
             return quote.get("last_price") or quote.get("ltp")
         except Exception as e:
@@ -244,6 +254,7 @@ class PaperBroker(Broker):
         try:
             resp = self._market_data_client.get_expiries(
                 exchange=self._market_data_client.EXCHANGE_NSE, underlying_symbol=underlying,
+                timeout=GROWW_API_TIMEOUT_SEC,
             )
             return [date.fromisoformat(d) for d in resp.get("expiries", [])]
         except Exception as e:
@@ -256,7 +267,7 @@ class PaperBroker(Broker):
         try:
             raw = self._market_data_client.get_option_chain(
                 exchange=self._market_data_client.EXCHANGE_NSE, underlying=underlying,
-                expiry_date=expiry_date.isoformat(),
+                expiry_date=expiry_date.isoformat(), timeout=GROWW_API_TIMEOUT_SEC,
             )
             return _parse_option_chain(underlying, expiry_date, raw)
         except Exception as e:
@@ -270,6 +281,7 @@ class PaperBroker(Broker):
         try:
             inst = self._market_data_client.get_instrument_by_exchange_and_trading_symbol(
                 exchange=self._market_data_client.EXCHANGE_NSE, trading_symbol=trading_symbol,
+                timeout=GROWW_API_TIMEOUT_SEC,
             )
             return int(inst["lot_size"])
         except Exception as e:
@@ -286,7 +298,7 @@ class PaperBroker(Broker):
                 exchange=self._market_data_client.EXCHANGE_NSE,
                 segment=self._market_data_client.SEGMENT_CASH,
                 groww_symbol=f"NSE-{symbol}", start_time=start_time, end_time=end_time,
-                candle_interval=interval,
+                candle_interval=interval, timeout=GROWW_API_TIMEOUT_SEC,
             )
             candles = _drop_unclosed_trailing_candle(_parse_candles(raw), interval, now)
             return candles[-lookback_bars:] if candles else candles
@@ -333,6 +345,7 @@ class LiveBroker(Broker):
                 exchange=self.client.EXCHANGE_NSE,
                 segment=_groww_segment(self.client, segment),
                 trading_symbol=symbol,
+                timeout=GROWW_API_TIMEOUT_SEC,
             )
 
         try:
@@ -358,6 +371,7 @@ class LiveBroker(Broker):
         def _call():
             return self.client.get_expiries(
                 exchange=self.client.EXCHANGE_NSE, underlying_symbol=underlying,
+                timeout=GROWW_API_TIMEOUT_SEC,
             )
 
         try:
@@ -381,7 +395,7 @@ class LiveBroker(Broker):
         def _call():
             return self.client.get_option_chain(
                 exchange=self.client.EXCHANGE_NSE, underlying=underlying,
-                expiry_date=expiry_date.isoformat(),
+                expiry_date=expiry_date.isoformat(), timeout=GROWW_API_TIMEOUT_SEC,
             )
 
         try:
@@ -407,6 +421,7 @@ class LiveBroker(Broker):
         def _call():
             return self.client.get_instrument_by_exchange_and_trading_symbol(
                 exchange=self.client.EXCHANGE_NSE, trading_symbol=trading_symbol,
+                timeout=GROWW_API_TIMEOUT_SEC,
             )
 
         try:
@@ -440,7 +455,7 @@ class LiveBroker(Broker):
             return self.client.get_historical_candles(
                 exchange=self.client.EXCHANGE_NSE, segment=self.client.SEGMENT_CASH,
                 groww_symbol=f"NSE-{symbol}", start_time=start_time, end_time=end_time,
-                candle_interval=interval,
+                candle_interval=interval, timeout=GROWW_API_TIMEOUT_SEC,
             )
 
         try:
@@ -470,6 +485,7 @@ class LiveBroker(Broker):
         def _call():
             return self.client.get_position_for_trading_symbol(
                 trading_symbol=symbol, segment=_groww_segment(self.client, segment),
+                timeout=GROWW_API_TIMEOUT_SEC,
             )
 
         try:
@@ -515,6 +531,7 @@ class LiveBroker(Broker):
                 validity=self.client.VALIDITY_DAY,
                 price=order.limit_price,
                 order_reference_id=order_reference_id,
+                timeout=GROWW_API_TIMEOUT_SEC,
             )
 
         try:
@@ -562,6 +579,7 @@ class LiveBroker(Broker):
             return self.client.get_order_status_by_reference(
                 segment=_groww_segment(self.client, segment),
                 order_reference_id=order_reference_id,
+                timeout=GROWW_API_TIMEOUT_SEC,
             )
 
         try:
@@ -592,6 +610,7 @@ class LiveBroker(Broker):
             return self.client.cancel_order(
                 groww_order_id=broker_order_id,
                 segment=_groww_segment(self.client, segment),
+                timeout=GROWW_API_TIMEOUT_SEC,
             )
 
         try:

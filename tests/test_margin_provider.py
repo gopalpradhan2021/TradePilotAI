@@ -1,3 +1,4 @@
+from core.execution import GROWW_API_TIMEOUT_SEC
 from core.margin_provider import GrowwMarginProvider
 from core.models import OptionType, OrderType, ProposedOrder, Segment, Side
 
@@ -117,3 +118,15 @@ def test_get_order_margin_returns_none_on_missing_total_requirement_key():
     provider = GrowwMarginProvider(client)
 
     assert provider.get_order_margin(make_order()) is None
+
+
+def test_get_order_margin_passes_timeout_on_both_calls():
+    # growwapi defaults to timeout=None (infinite) — a hung margin call would freeze the
+    # bot's risk-check path exactly like the live 3-hour incident this fixes (2026-08-31).
+    client = FakeGrowwClient()
+    provider = GrowwMarginProvider(client)
+
+    provider.get_order_margin(make_order())
+
+    assert client.order_margin_calls[0]["timeout"] == GROWW_API_TIMEOUT_SEC
+    assert client.available_margin_calls[0]["timeout"] == GROWW_API_TIMEOUT_SEC

@@ -62,7 +62,7 @@ def _normalize_dt(value: str) -> str:
 
 def fetch_candles(client, symbol: str, start_time: str, end_time: str, interval: str) -> list[dict]:
     """Shared by this CLI and scripts/nightly_optimize.py."""
-    from core.execution import _parse_candles
+    from core.execution import GROWW_API_TIMEOUT_SEC, _parse_candles
 
     response = client.get_historical_candles(
         exchange=client.EXCHANGE_NSE,
@@ -71,6 +71,7 @@ def fetch_candles(client, symbol: str, start_time: str, end_time: str, interval:
         start_time=start_time,
         end_time=end_time,
         candle_interval=interval,
+        timeout=GROWW_API_TIMEOUT_SEC,
     )
     return _parse_candles(response)
 

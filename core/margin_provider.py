@@ -8,7 +8,7 @@ are already injected) — see core/risk_manager.py's FNO branch in check().
 """
 import logging
 
-from core.execution import _groww_segment, _build_trading_symbol
+from core.execution import GROWW_API_TIMEOUT_SEC, _groww_segment, _build_trading_symbol
 from core.models import MarginQuote, ProposedOrder, Side
 
 logger = logging.getLogger("groww_agent.margin_provider")
@@ -39,10 +39,11 @@ class GrowwMarginProvider:
                     "product": self._client.PRODUCT_NRML,
                     "exchange": self._client.EXCHANGE_NSE,
                 }],
+                timeout=GROWW_API_TIMEOUT_SEC,
             )
             required_margin = resp["total_requirement"]
 
-            available = self._client.get_available_margin_details()
+            available = self._client.get_available_margin_details(timeout=GROWW_API_TIMEOUT_SEC)
             fno = available.get("fno_margin_details", {})
             is_future = order.option_type is None
             if is_future:
