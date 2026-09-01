@@ -1,4 +1,6 @@
-from scripts.nightly_optimize import MIN_TRADES_FOR_CONFIDENCE, TOP_N_CANDIDATES, rank_candidates
+from scripts.nightly_optimize import (
+    MIN_TRADES_FOR_CONFIDENCE, TOP_N_CANDIDATES, _param_grid, rank_candidates,
+)
 from strategies.ma_rsi_strategy import MARsiParams
 
 
@@ -62,3 +64,17 @@ def test_rank_candidates_caps_at_top_n():
 
 def test_rank_candidates_empty_input_returns_empty():
     assert rank_candidates([]) == []
+
+
+# --- --quick grid trimming (for slow intraday sweeps) ----------------------
+
+def test_quick_grid_is_smaller_than_full_grid():
+    full = list(_param_grid(quick=False))
+    quick = list(_param_grid(quick=True))
+    assert len(quick) == 32
+    assert len(quick) < len(full)
+
+
+def test_quick_grid_still_respects_long_greater_than_short():
+    for params in _param_grid(quick=True):
+        assert params.long_window > params.short_window

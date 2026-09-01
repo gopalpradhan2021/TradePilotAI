@@ -2,9 +2,9 @@
 Nightly off-hours strategy parameter sweep.
 
 Runs after market close (see deploy/groww-nightly-optimize.timer), fetches the longest single
-daily-candle window Groww allows (180 days), splits it into an in-sample window (search) and an
-out-of-sample window (validation), and backtests a small grid of MARsiParams candidates plus the
-current production defaults (the baseline) across both windows.
+candle window Groww allows for the chosen --interval, splits it into an in-sample window (search)
+and an out-of-sample window (validation), and backtests a small grid of MARsiParams candidates
+plus the current production defaults (the baseline) across both windows.
 
 This NEVER changes what the live/paper bot actually trades with — it only ever writes a report
 row (core/db/optimization_repo.py) and sends one notification. Adopting a candidate requires a
@@ -15,12 +15,20 @@ Ranking uses only out-of-sample net P&L, specifically to avoid rewarding paramet
 curve-fit the search window. A candidate with fewer than MIN_TRADES_FOR_CONFIDENCE trades in
 either window is flagged "insufficient sample" rather than ranked on a lucky single trade.
 
-Daily candles only (not intraday) — Groww caps 5-minute candles at a 30-day window, too short to
-split into a meaningful in-sample/out-of-sample pair. Intraday backtesting stays available via
-scripts/backtest.py and the dashboard's ad-hoc Backtest page, just not this automated sweep.
+Defaults to daily candles (180-day lookback) — the scheduled nightly cron job's mode, thorough but
+cheap since a daily-bar backtest is fast regardless of grid size. --interval 5minute switches to
+real intraday candles instead (the actual granularity the live bot trades at), capped by Groww at
+a ~30-day lookback (see --days) — pass --quick too unless you're prepared to wait: an intraday
+backtest processes ~15x more bars than a daily one per calendar day, so the full 243-combo grid
+against 15 symbols can run for hours on this droplet's single vCPU. Confirmed live 2026-09-01: a
+daily-candle sweep found too few trades in any window to draw a real conclusion; the same symbols'
+actual 5-minute performance turned out to be a clear net loss (106 trades, 21.7% win rate) — the
+daily-bar sweep's "inconclusive" verdict was an artifact of too little data, not evidence the
+strategy was fine, which is the whole reason this flag exists now.
 
 Usage:
     python -m scripts.nightly_optimize [--symbols RELIANCE] [--force]
+    python -m scripts.nightly_optimize --symbols RELIANCE --interval 5minute --days 28 --quick
 
 --force skips the "are we actually after market close" check (for manual/debug runs).
 """
@@ -39,7 +47,9 @@ TOP_N_CANDIDATES = 5
 IN_SAMPLE_FRACTION = 2 / 3
 
 # Small, explicit grid — kept intentionally modest so a nightly run on a 512MB droplet finishes
-# in a reasonable time running strictly sequentially, one candidate at a time.
+# in a reasonable time running strictly sequentially, one candidate at a time. --quick trims each
+# dimension to its first 2 choices (32 combos instead of 243) — see the module docstring for why
+# that matters for --interval 5minute specifically.
 SHORT_WINDOW_CHOICES = [5, 9, 12]
 LONG_WINDOW_CHOICES = [15, 21, 26]
 RSI_BAND_CHOICES = [(35, 70), (40, 70), (40, 75)]
@@ -52,14 +62,26 @@ def _parse_args():
     parser.add_argument("--symbols", nargs="+", default=["RELIANCE"])
     parser.add_argument("--force", action="store_true",
                          help="Run even if the market currently looks open (manual/debug use).")
+    parser.add_argument("--interval", default="1day",
+                         help='Candle interval for the sweep, e.g. "1day" (default) or "5minute".')
+    parser.add_argument("--days", type=int, default=179,
+                         help="Lookback window in days (default 179; Groww caps 5minute candles "
+                              "at roughly 30 days — pass e.g. --days 28 for an intraday sweep).")
+    parser.add_argument("--quick", action="store_true",
+                         help="Trim the parameter grid to 32 combinations instead of 243 — for "
+                              "slow intraday (--interval 5minute) sweeps.")
     return parser.parse_args()
 
 
-def _param_grid():
+def _param_grid(quick: bool = False):
     from strategies.ma_rsi_strategy import MARsiParams
+    short_choices = SHORT_WINDOW_CHOICES[:2] if quick else SHORT_WINDOW_CHOICES
+    long_choices = LONG_WINDOW_CHOICES[:2] if quick else LONG_WINDOW_CHOICES
+    rsi_choices = RSI_BAND_CHOICES[:2] if quick else RSI_BAND_CHOICES
+    gap_choices = MIN_GAP_CHOICES[:2] if quick else MIN_GAP_CHOICES
+    cooldown_choices = COOLDOWN_CHOICES[:2] if quick else COOLDOWN_CHOICES
     for short_w, long_w, rsi_band, gap, cooldown in itertools.product(
-        SHORT_WINDOW_CHOICES, LONG_WINDOW_CHOICES, RSI_BAND_CHOICES,
-        MIN_GAP_CHOICES, COOLDOWN_CHOICES,
+        short_choices, long_choices, rsi_choices, gap_choices, cooldown_choices,
     ):
         if long_w <= short_w:
             continue
@@ -156,12 +178,12 @@ def main():
 
     from datetime import date, timedelta
     end = date.today()
-    start = end - timedelta(days=179)
+    start = end - timedelta(days=args.days)
     start_str, end_str = f"{start} 00:00:00", f"{end} 23:59:59"
 
     for symbol in args.symbols:
-        logger.info("Fetching 180-day daily candles for %s", symbol)
-        candles = fetch_candles(client, symbol, start_str, end_str, "1day")
+        logger.info("Fetching %d-day %s candles for %s", args.days, args.interval, symbol)
+        candles = fetch_candles(client, symbol, start_str, end_str, args.interval)
         if len(candles) < 30:
             logger.warning("%s: only %d candles returned — skipping (too little data).",
                             symbol, len(candles))
@@ -190,7 +212,7 @@ def main():
 
         candidate_results = []
         combos_tried = 0
-        for params in _param_grid():
+        for params in _param_grid(args.quick):
             combos_tried += 1
             in_report = _run_one({symbol: in_sample}, [symbol], base_settings, params)
             if in_report["total_trades"] == 0 or in_report["net_pnl"] <= 0:
