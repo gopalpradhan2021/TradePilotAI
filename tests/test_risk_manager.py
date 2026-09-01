@@ -462,3 +462,49 @@ def test_halt_circuit_breaker_cannot_be_manually_resumed():
         pass
 
     assert rm.halted is True
+
+
+# --- new-entry block past the MIS square-off cutoff (3:20 PM IST) ---------
+
+def test_cash_buy_rejected_past_square_off_cutoff(monkeypatch):
+    monkeypatch.setattr(risk_manager_module, "is_past_square_off_cutoff", lambda: True)
+    rm = RiskManager(make_cfg())
+    order = make_order(side=Side.BUY)
+
+    result = check(rm, order, ltp=100.0)
+
+    assert not result.approved
+    assert any("square-off cutoff" in r for r in result.reasons)
+
+
+def test_cash_buy_approved_before_square_off_cutoff(monkeypatch):
+    monkeypatch.setattr(risk_manager_module, "is_past_square_off_cutoff", lambda: False)
+    rm = RiskManager(make_cfg())
+    order = make_order(side=Side.BUY)
+
+    result = check(rm, order, ltp=100.0)
+
+    assert result.approved
+
+
+def test_cash_sell_never_blocked_by_square_off_cutoff(monkeypatch):
+    # A SELL closing a real position must always be allowed — same principle as every
+    # other BUY-only gate in check() (max_position_qty, order-value cap).
+    monkeypatch.setattr(risk_manager_module, "is_past_square_off_cutoff", lambda: True)
+    rm = RiskManager(make_cfg())
+    order = make_order(side=Side.SELL)
+
+    result = check(rm, order, ltp=100.0)
+
+    assert result.approved
+
+
+def test_fno_buy_never_blocked_by_square_off_cutoff(monkeypatch):
+    # FNO defaults to PRODUCT_NRML, not MIS — no same-day square-off obligation.
+    monkeypatch.setattr(risk_manager_module, "is_past_square_off_cutoff", lambda: True)
+    rm = RiskManager(make_cfg(allow_fno=True, max_position_qty=100), mode="PAPER")
+    order = make_order(side=Side.BUY, segment=Segment.FNO, lot_size=50)
+
+    result = check(rm, order, ltp=100.0)
+
+    assert result.approved

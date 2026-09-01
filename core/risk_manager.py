@@ -14,6 +14,7 @@ from typing import Callable
 
 from config.settings import RiskConfig
 from core.db import positions_repo, risk_repo
+from core.market_hours import is_past_square_off_cutoff
 from core.models import ProposedOrder, RiskCheckResult, Segment, Side
 from core.notifier import send_notification_raw
 
@@ -159,6 +160,20 @@ class RiskManager:
 
         if order.qty <= 0:
             reasons.append("Quantity must be positive.")
+
+        # A CASH position opened this late would just get force-closed by
+        # Orchestrator._maybe_square_off_mis_positions() on its very next 60s check —
+        # found live 2026-09-01: the strategy kept opening fresh entries all afternoon,
+        # each one squared off within ~60s of opening, paying full entry+exit charges plus
+        # the ₹59 penalty for essentially no holding time. SELL is untouched — closing a
+        # real position must always be allowed, same principle as every other BUY-only
+        # gate in this method.
+        if order.segment == Segment.CASH and order.side == Side.BUY and is_past_square_off_cutoff():
+            reasons.append(
+                "New CASH entries are blocked past the MIS auto-square-off cutoff "
+                "(3:20 PM IST) — a real broker's MIS order would just be force-closed "
+                "before the session ends."
+            )
 
         # Entry-sizing gate — only applies to new exposure (BUY). A SELL closing a real
         # position must never be blocked by it: qty is fixed at whatever was actually
