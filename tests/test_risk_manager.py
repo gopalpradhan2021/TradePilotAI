@@ -182,6 +182,16 @@ def test_daily_trade_count_cap_still_enforced_when_mode_unspecified():
     assert not result.approved
 
 
+def test_daily_trade_count_cap_never_blocks_sell_orders():
+    # Found live 2026-09-01 running a multi-symbol backtest: 15 symbols sharing one global
+    # daily counter exhausted it early, and the cap was blocking exits too — including MIS
+    # auto-square-offs, leaving positions stuck open exactly when they most needed to close.
+    rm = RiskManager(make_cfg(max_trades_per_day=1))
+    rm._trades_today = 5  # already well past the configured cap
+    result = check(rm, make_order(side=Side.SELL), ltp=100.0)
+    assert result.approved
+
+
 def test_order_value_cap():
     rm = RiskManager(make_cfg(max_order_value_inr=500))
     result = check(rm, make_order(qty=10), ltp=100.0)  # order value = 1000

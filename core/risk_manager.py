@@ -196,7 +196,15 @@ class RiskManager:
                 f"exceeds max_position_qty {self.cfg.max_position_qty}."
             )
 
-        if self.mode != "PAPER" and self._trades_today >= self.cfg.max_trades_per_day:
+        # BUY-only, same principle as every other entry-sizing gate in this method — a SELL
+        # closing a real position must never be blocked. Found live 2026-09-01 running a
+        # multi-symbol backtest: with 15 symbols sharing one global daily counter, the cap
+        # is exhausted early in the day, and blocking exits too meant positions (including
+        # ones the MIS square-off check was trying to force-close) got stuck open simply
+        # because the bot ran out of its own trade quota — strictly worse for risk, not
+        # better, since an unclosed position is exactly what this cap exists to avoid.
+        if (self.mode != "PAPER" and order.side == Side.BUY
+                and self._trades_today >= self.cfg.max_trades_per_day):
             reasons.append(
                 f"Daily trade count limit reached ({self.cfg.max_trades_per_day})."
             )

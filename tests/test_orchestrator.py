@@ -1211,11 +1211,20 @@ def test_square_off_check_only_runs_once_per_interval(monkeypatch):
     assert len(calls) == 1  # only the first call actually checked the cutoff
 
 
+class NoLtpBroker(FixedPriceBroker):
+    def get_ltp(self, symbol, segment=None):
+        return None
+
+
 def test_square_off_blocked_order_leaves_position_open(monkeypatch):
+    # SELL orders are exempt from max_trades_per_day (and every other entry-sizing gate) —
+    # found live 2026-09-01 that blocking exits there caused a hard crash (a blocked SELL
+    # left the strategy believing it was flat while the DB position stayed open, colliding
+    # with the next BUY). Force a block a different way: no reference price available.
     monkeypatch.setattr(orchestrator_module, "is_past_square_off_cutoff", lambda *a, **k: True)
-    settings = make_settings(max_trades_per_day=0)
+    settings = make_settings()
     risk_manager = RiskManager(settings.risk)
-    broker = FixedPriceBroker(price=110.0)
+    broker = NoLtpBroker(price=110.0)
     strategy = ForceExitRecordingStrategy()
     orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
     orchestrator._last_square_off_check_time = time.monotonic() - 9999
