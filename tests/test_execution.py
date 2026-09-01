@@ -533,6 +533,10 @@ def test_paper_broker_get_lot_size_returns_real_value():
     client = FakeGrowwClient(instrument_response={"lot_size": "65"})
     broker = PaperBroker(market_data_client=client)
     assert broker.get_lot_size("NIFTY2690122000CE") == 65
+    # get_instrument_by_exchange_and_trading_symbol() takes no `timeout` kwarg in the
+    # real growwapi SDK — passing one raises TypeError on every real call (regression
+    # test for that; FakeGrowwClient's **kwargs signature would silently accept it).
+    assert "timeout" not in client.instrument_calls[0]
 
 
 def test_live_broker_get_expiries_reauths_on_auth_exception(monkeypatch):
@@ -564,6 +568,10 @@ def test_live_broker_get_lot_size_returns_real_value():
     client = FakeGrowwClient(instrument_response={"lot_size": "65"})
     broker = LiveBroker(client)
     assert broker.get_lot_size("NIFTY2690122000CE") == 65
+    # get_instrument_by_exchange_and_trading_symbol() takes no `timeout` kwarg in the
+    # real growwapi SDK — passing one raises TypeError on every real call (regression
+    # test for that; FakeGrowwClient's **kwargs signature would silently accept it).
+    assert "timeout" not in client.instrument_calls[0]
 
 
 def test_live_broker_get_lot_size_returns_none_on_fetch_error():

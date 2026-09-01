@@ -281,7 +281,6 @@ class PaperBroker(Broker):
         try:
             inst = self._market_data_client.get_instrument_by_exchange_and_trading_symbol(
                 exchange=self._market_data_client.EXCHANGE_NSE, trading_symbol=trading_symbol,
-                timeout=GROWW_API_TIMEOUT_SEC,
             )
             return int(inst["lot_size"])
         except Exception as e:
@@ -421,7 +420,6 @@ class LiveBroker(Broker):
         def _call():
             return self.client.get_instrument_by_exchange_and_trading_symbol(
                 exchange=self.client.EXCHANGE_NSE, trading_symbol=trading_symbol,
-                timeout=GROWW_API_TIMEOUT_SEC,
             )
 
         try:
