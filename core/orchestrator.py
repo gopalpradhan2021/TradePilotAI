@@ -10,10 +10,10 @@ import time
 from typing import Callable
 
 from config.settings import Settings
-from core.cost_model import calculate_order_charges
+from core.cost_model import calculate_order_charges, calculate_square_off_penalty
 from core.db import orders_repo, positions_repo, risk_repo
-from core.market_hours import is_market_open
-from core.models import ProposedOrder, Segment, Side
+from core.market_hours import is_market_open, is_past_square_off_cutoff
+from core.models import OrderType, ProposedOrder, Segment, Side
 from core.position_sizing import calculate_entry_qty
 from core.notifier import send_notification
 from core.reconciliation import reconcile_positions
@@ -58,6 +58,11 @@ class Orchestrator:
     # pass — see the comment at its call site for why (a real live rate-limit incident).
     _CANDLE_FETCH_STAGGER_SEC = 0.2
 
+    # How often to check for CASH positions still open past Groww's real 3:20 PM IST MIS
+    # auto-square-off cutoff. Cheap (a time check + one DB query per symbol) — no need for
+    # tick-level granularity like the LTP loop.
+    _SQUARE_OFF_CHECK_INTERVAL_SEC = 60
+
     def __init__(self, settings: Settings, broker, risk_manager, strategy,
                  fno_strategy=None, fno_market_data=None,
                  clock: Callable[[], float] | None = None):
@@ -86,6 +91,7 @@ class Orchestrator:
         self._last_reconcile_time = self._clock()
         self._last_fno_cycle_time = self._clock()
         self._last_candle_fetch_time = self._clock()
+        self._last_square_off_check_time = self._clock()
         # {symbol: (last_seen_price, monotonic_time_that_price_was_first_seen)} — tracks how
         # long each symbol's LTP has gone UNCHANGED, not just how long since the last fetch,
         # since a degraded feed returning the same cached value on every successful call is a
@@ -155,6 +161,36 @@ class Orchestrator:
                 continue
             self.strategy.update_candles(symbol, candles)
 
+    def _maybe_square_off_mis_positions(self, symbols: list[str]):
+        """At most once per _SQUARE_OFF_CHECK_INTERVAL_SEC, and only past Groww's real
+        3:20 PM IST MIS cutoff — force-closes any CASH position still open, mirroring the
+        mandatory broker-side square-off a real MIS order (core/execution.py's
+        _groww_product(), CASH always PRODUCT_MIS) is subject to. Routes the closing SELL
+        through the same _handle_proposed_order() -> risk_manager.check() ->
+        broker.place_order() funnel as every other order — no bypass, even for a forced
+        exit."""
+        now = self._clock()
+        if now - self._last_square_off_check_time < self._SQUARE_OFF_CHECK_INTERVAL_SEC:
+            return
+        self._last_square_off_check_time = now
+
+        if not is_past_square_off_cutoff():
+            return
+
+        for symbol in symbols:
+            open_pos = positions_repo.get_open_position(symbol)
+            if open_pos is None or open_pos.get("segment", "CASH") != "CASH":
+                continue
+            ltp = self.broker.get_ltp(symbol) or self._last_ltp.get(symbol)
+            order = ProposedOrder(
+                symbol=symbol, side=Side.SELL, qty=open_pos["qty"], order_type=OrderType.MARKET,
+                reason="AUTO_SQUARE_OFF: MIS position force-closed at broker's 3:20 PM IST cutoff",
+            )
+            self._handle_proposed_order(order, ltp, extra_charges=calculate_square_off_penalty())
+            if positions_repo.get_open_position(symbol) is None:
+                self.strategy.force_exit(symbol)
+                logger.info("%s: MIS position auto-squared-off (3:20 PM IST cutoff).", symbol)
+
     def run_once_fno(self, underlyings: list[str]):
         for underlying in underlyings:
             chain = self.fno_market_data.get_chain(underlying)
@@ -222,6 +258,7 @@ class Orchestrator:
             return
 
         self._maybe_update_candles(symbols)
+        self._maybe_square_off_mis_positions(symbols)
 
         for symbol in symbols:
             ltp = self.broker.get_ltp(symbol)
@@ -258,7 +295,8 @@ class Orchestrator:
         except Exception as e:
             logger.error("Failed to write heartbeat: %s", e)
 
-    def _handle_proposed_order(self, order: ProposedOrder, ltp: float | None):
+    def _handle_proposed_order(self, order: ProposedOrder, ltp: float | None,
+                                extra_charges: float = 0.0):
         ref_price = order.limit_price or ltp
         # Capital-aware CASH sizing — the strategy's qty (DEFAULT_ORDER_QTY, a nominal
         # placeholder) gets overwritten here, before the order is ever persisted, so the
@@ -312,7 +350,7 @@ class Orchestrator:
         # would actually cost, not just the raw price move.
         charges = None
         if result.status == "FILLED" and result.fill_price is not None and order.segment == Segment.CASH:
-            charges = calculate_order_charges(result.fill_price * order.qty, order.side)
+            charges = calculate_order_charges(result.fill_price * order.qty, order.side) + extra_charges
         orders_repo.update_order_status(
             order_id,
             status=result.status,

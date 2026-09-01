@@ -145,6 +145,15 @@ class MARsiStrategy(BaseStrategy):
         state.entry_price = entry_price
         logger.info("%s: restored open position on startup, entry_price=%.2f", symbol, entry_price)
 
+    def force_exit(self, symbol: str) -> None:
+        # Mirrors decide()'s own SELL branch exactly — deliberately leaves
+        # prev_short_ma/prev_long_ma untouched (crossover-detection history is independent
+        # of position state).
+        state = self._get_state(symbol)
+        state.in_position = False
+        state.entry_price = None
+        state.last_exit_time = self._clock()
+
     def get_candle_requirements(self) -> tuple[str, int]:
         return self.params.candle_interval, self.params.candle_lookback_bars
 

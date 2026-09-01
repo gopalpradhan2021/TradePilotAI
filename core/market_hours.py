@@ -24,3 +24,16 @@ def market_status_ist() -> tuple[str, str, datetime]:
 
 def is_market_open() -> bool:
     return market_status_ist()[0] == "OPEN"
+
+
+SQUARE_OFF_CUTOFF_IST = dtime(15, 20)
+
+
+def is_past_square_off_cutoff() -> bool:
+    """True once Groww's real MIS auto-square-off cutoff (3:20 PM IST) has passed on a
+    trading day. Deliberately not derived from market_status_ist()'s CLOSING window
+    (15:30-16:00) — CLOSING starts 10 minutes too late for this purpose."""
+    now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
+    if now_ist.weekday() >= 5:
+        return False
+    return now_ist.time() >= SQUARE_OFF_CUTOFF_IST

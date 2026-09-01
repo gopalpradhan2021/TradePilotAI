@@ -1,6 +1,6 @@
 import pytest
 
-from core.cost_model import calculate_order_charges
+from core.cost_model import calculate_order_charges, calculate_square_off_penalty
 from core.models import Side
 
 
@@ -56,3 +56,8 @@ def test_charges_scale_roughly_linearly_below_the_brokerage_cap():
 def test_zero_trade_value_produces_zero_charges():
     assert calculate_order_charges(0.0, Side.BUY) == 0.0
     assert calculate_order_charges(0.0, Side.SELL) == 0.0
+
+
+def test_square_off_penalty_is_flat_fee_plus_gst():
+    # Rs 50 flat fee + 18% GST = Rs 59, fixed regardless of trade value.
+    assert calculate_square_off_penalty() == 59.0

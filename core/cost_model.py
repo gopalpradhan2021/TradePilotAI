@@ -38,3 +38,13 @@ def calculate_order_charges(trade_value: float, side: Side) -> float:
     stamp_duty = trade_value * STAMP_DUTY_BUY_RATE if side == Side.BUY else 0.0
     gst = (brokerage + exchange_txn + sebi_turnover) * GST_RATE
     return round(brokerage + stt + exchange_txn + sebi_turnover + stamp_duty + gst, 4)
+
+
+AUTO_SQUARE_OFF_PENALTY_INR = 50.0  # Groww's flat per-position MIS-not-squared-off fee
+
+
+def calculate_square_off_penalty() -> float:
+    """Flat fee for a CASH MIS position force-closed by the broker at the 3:20 PM IST
+    cutoff, plus GST. A separate line item from calculate_order_charges() (independent of
+    trade value) — added on top of it only for a forced square-off's exit charges."""
+    return round(AUTO_SQUARE_OFF_PENALTY_INR * (1 + GST_RATE), 2)

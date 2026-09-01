@@ -3,7 +3,7 @@ from datetime import date, datetime
 
 import core.orchestrator as orchestrator_module
 from config.settings import RiskConfig, Settings
-from core.cost_model import calculate_order_charges
+from core.cost_model import calculate_order_charges, calculate_square_off_penalty
 from core.db import orders_repo, positions_repo
 from core.execution import BrokerPositionFetchError, PaperBroker
 from core.models import OptionChainSnapshot, ProposedOrder, ExecutionResult, Segment, Side, OrderType
@@ -1059,3 +1059,145 @@ def test_fno_order_qty_never_resized_by_cash_sizing_logic():
     orders = orders_repo.get_recent_orders(10)
     assert orders[0]["qty"] == 1
     assert orders[0]["status"] == "FILLED"
+
+
+# --- MIS auto-square-off (3:20 PM IST cutoff) -----------------------------
+
+class ForceExitRecordingStrategy(BaseStrategy):
+    def __init__(self):
+        self.force_exit_calls = []
+
+    def decide(self, symbol, last_traded_price):
+        return None
+
+    def force_exit(self, symbol):
+        self.force_exit_calls.append(symbol)
+
+
+def _seed_open_position(symbol="RELIANCE", qty=5, entry_price=100.0, entry_charges=1.0,
+                         segment="CASH", underlying_symbol=None):
+    oid = orders_repo.insert_order(make_buy_order(symbol=symbol, qty=qty),
+                                    status="FILLED", reference_price=entry_price)
+    positions_repo.open_position(symbol=symbol, qty=qty, entry_price=entry_price,
+                                  entry_order_id=oid, segment=segment,
+                                  underlying_symbol=underlying_symbol, entry_charges=entry_charges)
+
+
+def test_square_off_closes_open_cash_position_past_cutoff(monkeypatch):
+    monkeypatch.setattr(orchestrator_module, "is_past_square_off_cutoff", lambda: True)
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=110.0)
+    strategy = ForceExitRecordingStrategy()
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+    orchestrator._last_square_off_check_time = time.monotonic() - 9999
+
+    _seed_open_position(qty=5, entry_price=100.0, entry_charges=1.0)
+
+    orchestrator.run_once(symbols=["RELIANCE"])
+
+    assert positions_repo.get_open_position("RELIANCE") is None
+    assert strategy.force_exit_calls == ["RELIANCE"]
+
+    orders = orders_repo.get_recent_orders(10)
+    sell_order = next(o for o in orders if o["side"] == "SELL")
+    assert sell_order["status"] == "FILLED"
+    assert sell_order["reason"].startswith("AUTO_SQUARE_OFF:")
+
+    exit_charges = calculate_order_charges(110.0 * 5, Side.SELL) + calculate_square_off_penalty()
+    expected_pnl = round((110.0 - 100.0) * 5 - 1.0 - exit_charges, 2)
+    closed = positions_repo.get_closed_positions()
+    assert closed[0]["realized_pnl"] == expected_pnl
+
+
+def test_square_off_noop_before_cutoff(monkeypatch):
+    monkeypatch.setattr(orchestrator_module, "is_past_square_off_cutoff", lambda: False)
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=110.0)
+    strategy = ForceExitRecordingStrategy()
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+    orchestrator._last_square_off_check_time = time.monotonic() - 9999
+
+    _seed_open_position()
+
+    orchestrator.run_once(symbols=["RELIANCE"])
+
+    assert positions_repo.get_open_position("RELIANCE") is not None
+    assert strategy.force_exit_calls == []
+    orders = orders_repo.get_recent_orders(10)
+    assert all(o["side"] == "BUY" for o in orders)  # no SELL was proposed
+
+
+def test_square_off_noop_when_no_open_position(monkeypatch):
+    monkeypatch.setattr(orchestrator_module, "is_past_square_off_cutoff", lambda: True)
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=110.0)
+    strategy = ForceExitRecordingStrategy()
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+    orchestrator._last_square_off_check_time = time.monotonic() - 9999
+
+    orchestrator.run_once(symbols=["RELIANCE"])  # must not raise
+
+    assert orders_repo.get_recent_orders(10) == []
+    assert strategy.force_exit_calls == []
+
+
+def test_square_off_check_only_runs_once_per_interval(monkeypatch):
+    calls = []
+
+    def fake_cutoff():
+        calls.append(1)
+        return False
+
+    monkeypatch.setattr(orchestrator_module, "is_past_square_off_cutoff", fake_cutoff)
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=110.0)
+    strategy = ForceExitRecordingStrategy()
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+    orchestrator._last_square_off_check_time = time.monotonic() - 9999
+
+    orchestrator.run_once(symbols=["RELIANCE"])
+    orchestrator.run_once(symbols=["RELIANCE"])
+    orchestrator.run_once(symbols=["RELIANCE"])
+
+    assert len(calls) == 1  # only the first call actually checked the cutoff
+
+
+def test_square_off_blocked_order_leaves_position_open(monkeypatch):
+    monkeypatch.setattr(orchestrator_module, "is_past_square_off_cutoff", lambda: True)
+    settings = make_settings(max_trades_per_day=0)
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=110.0)
+    strategy = ForceExitRecordingStrategy()
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+    orchestrator._last_square_off_check_time = time.monotonic() - 9999
+
+    _seed_open_position()
+
+    orchestrator.run_once(symbols=["RELIANCE"])
+
+    assert positions_repo.get_open_position("RELIANCE") is not None
+    assert strategy.force_exit_calls == []
+    orders = orders_repo.get_recent_orders(10)
+    sell_order = next(o for o in orders if o["side"] == "SELL")
+    assert sell_order["status"] == "BLOCKED"
+
+
+def test_square_off_skips_fno_positions(monkeypatch):
+    monkeypatch.setattr(orchestrator_module, "is_past_square_off_cutoff", lambda: True)
+    settings = make_settings()
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=110.0)
+    strategy = ForceExitRecordingStrategy()
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+    orchestrator._last_square_off_check_time = time.monotonic() - 9999
+
+    _seed_open_position(symbol="NIFTY2690122000CE", segment="FNO", underlying_symbol="NIFTY")
+
+    orchestrator.run_once(symbols=["NIFTY2690122000CE"])
+
+    assert positions_repo.get_open_position("NIFTY2690122000CE") is not None
+    assert strategy.force_exit_calls == []

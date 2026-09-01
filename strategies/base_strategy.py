@@ -38,6 +38,12 @@ class BaseStrategy(ABC):
         cold after a restart. Default: no-op."""
         pass
 
+    def force_exit(self, symbol: str) -> None:
+        """Optional: called when a position is closed OUTSIDE decide() (e.g. Orchestrator's
+        MIS auto-square-off), so the strategy resyncs its belief with DB reality instead of
+        still thinking it holds a position it no longer holds. Default: no-op."""
+        pass
+
     def get_debug_info(self, symbol: str) -> dict:
         """Optional: a snapshot of whatever internal state is useful to show an operator
         (indicator values, how close to a signal, warmup progress) — purely observational,

@@ -253,6 +253,44 @@ def test_restore_position_sets_in_position_and_entry_price():
     assert state.entry_price == 150.0
 
 
+# --- force_exit (MIS auto-square-off resync) -----------------------------
+
+def test_force_exit_resets_in_position_and_entry_price(monkeypatch):
+    fake_clock = {"now": 123.0}
+    _patch_clock(monkeypatch, fake_clock)
+
+    strategy = MARsiStrategy()
+    _enter_position(strategy, monkeypatch, entry_price=100.0)
+
+    strategy.force_exit("RELIANCE")
+
+    state = strategy._get_state("RELIANCE")
+    assert state.in_position is False
+    assert state.entry_price is None
+    assert state.last_exit_time == 123.0
+
+
+def test_force_exit_leaves_ma_history_untouched(monkeypatch):
+    strategy = MARsiStrategy()
+    _enter_position(strategy, monkeypatch, entry_price=100.0)
+    state = strategy._get_state("RELIANCE")
+    prev_short, prev_long = state.prev_short_ma, state.prev_long_ma
+
+    strategy.force_exit("RELIANCE")
+
+    assert state.prev_short_ma == prev_short
+    assert state.prev_long_ma == prev_long
+
+
+def test_force_exit_on_unknown_symbol_does_not_crash():
+    strategy = MARsiStrategy()
+    strategy.force_exit("TCS")  # no prior state — should lazily create and reset cleanly
+
+    state = strategy._get_state("TCS")
+    assert state.in_position is False
+    assert state.entry_price is None
+
+
 # --- MARsiParams override (scripts/nightly_optimize.py's sweep mechanism) ----
 
 def test_default_params_match_module_constants():
