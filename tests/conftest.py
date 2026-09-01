@@ -12,8 +12,8 @@ def not_past_square_off_cutoff(monkeypatch):
     monkeypatch it back to True themselves, which overrides this for just that test."""
     import core.orchestrator as orchestrator_module
     import core.risk_manager as risk_manager_module
-    monkeypatch.setattr(risk_manager_module, "is_past_square_off_cutoff", lambda: False)
-    monkeypatch.setattr(orchestrator_module, "is_past_square_off_cutoff", lambda: False)
+    monkeypatch.setattr(risk_manager_module, "is_past_square_off_cutoff", lambda *a, **k: False)
+    monkeypatch.setattr(orchestrator_module, "is_past_square_off_cutoff", lambda *a, **k: False)
 
 
 @pytest.fixture(autouse=True)

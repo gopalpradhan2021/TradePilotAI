@@ -9,8 +9,9 @@ tracked as running state at all — it's derived from open positions on every
 read, so it can't drift from reality across a crash.
 """
 import logging
-from datetime import date
+from datetime import date, datetime
 from typing import Callable
+from zoneinfo import ZoneInfo
 
 from config.settings import RiskConfig
 from core.db import positions_repo, risk_repo
@@ -24,10 +25,17 @@ logger = logging.getLogger("groww_agent.risk")
 class RiskManager:
     def __init__(self, risk_config: RiskConfig, ntfy_topic: str = "",
                  today_fn: Callable[[], date] = date.today, mode: str = "LIVE",
-                 margin_provider=None):
+                 margin_provider=None,
+                 now_ist_fn: Callable[[], datetime] = lambda: datetime.now(ZoneInfo("Asia/Kolkata"))):
         """today_fn defaults to the real wall-clock date; scripts/backtest.py injects a
         simulated clock instead, so day-rollover (and the daily counters it resets) tracks
         simulated historical days rather than the backtest process's real run time.
+
+        now_ist_fn defaults to the real wall-clock IST instant, used only for the MIS
+        square-off cutoff check below — core/backtest_engine.py injects SimClock.now_ist
+        instead, so a backtest run after 3:20 PM real IST time doesn't have every CASH BUY
+        rejected regardless of which historical date is actually being replayed (found
+        live 2026-09-01 — see is_past_square_off_cutoff()'s docstring).
 
         mode defaults to "LIVE" (the conservative choice — enforce every cap unless told
         otherwise) so existing callers that don't pass it keep today's behavior unchanged.
@@ -46,6 +54,7 @@ class RiskManager:
         self._today_fn = today_fn
         self.mode = mode
         self._margin_provider = margin_provider
+        self._now_ist_fn = now_ist_fn
         self._current_day = self._today_fn()
         self._sync_daily_state()
 
@@ -168,7 +177,7 @@ class RiskManager:
         # the ₹59 penalty for essentially no holding time. SELL is untouched — closing a
         # real position must always be allowed, same principle as every other BUY-only
         # gate in this method.
-        if order.segment == Segment.CASH and order.side == Side.BUY and is_past_square_off_cutoff():
+        if order.segment == Segment.CASH and order.side == Side.BUY and is_past_square_off_cutoff(self._now_ist_fn()):
             reasons.append(
                 "New CASH entries are blocked past the MIS auto-square-off cutoff "
                 "(3:20 PM IST) — a real broker's MIS order would just be force-closed "

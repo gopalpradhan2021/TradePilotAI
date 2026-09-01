@@ -11,6 +11,7 @@ of the CLI/report-printing concerns; it just returns a report dict.
 import os
 from dataclasses import replace
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 from config.settings import Settings
 from core.db import positions_repo, risk_repo
@@ -34,6 +35,13 @@ class SimClock:
     def monotonic(self) -> float:
         return self.current.timestamp()
 
+    def now_ist(self) -> datetime:
+        """Groww's historical candle timestamps are IST local time — naive ones are
+        already IST wall-clock, so they're stamped as such rather than converted."""
+        if self.current.tzinfo is None:
+            return self.current.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+        return self.current.astimezone(ZoneInfo("Asia/Kolkata"))
+
 
 def run_backtest(candles_by_symbol: dict[str, list[dict]], symbols: list[str],
                   settings: Settings, strategy_params: MARsiParams | None = None) -> dict:
@@ -48,9 +56,11 @@ def run_backtest(candles_by_symbol: dict[str, list[dict]], symbols: list[str],
     sim_clock = SimClock(candles_by_symbol[driving_symbol][0]["timestamp"])
 
     broker = PaperBroker(market_data_client=replay_client)
-    risk_manager = RiskManager(settings.risk, ntfy_topic="", today_fn=sim_clock.today)
+    risk_manager = RiskManager(settings.risk, ntfy_topic="", today_fn=sim_clock.today,
+                                now_ist_fn=sim_clock.now_ist)
     strategy = MARsiStrategy(clock=sim_clock.monotonic, params=strategy_params)
-    orchestrator = Orchestrator(settings, broker, risk_manager, strategy, clock=sim_clock.monotonic)
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy,
+                                 clock=sim_clock.monotonic, now_ist_fn=sim_clock.now_ist)
 
     bars = 0
     while any(replay_client.has_more(s) for s in symbols):

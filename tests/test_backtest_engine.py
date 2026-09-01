@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 
 from config.settings import RiskConfig, Settings
 from core.backtest_engine import backtest_settings, run_backtest
+from core.db import orders_repo
 from strategies.ma_rsi_strategy import MARsiParams
 
 
@@ -54,6 +55,43 @@ def test_run_backtest_accepts_strategy_params_override_and_runs_end_to_end():
     # that the pipeline ran end to end and produced a coherent report shape.
     assert report["total_trades"] >= 0
     assert isinstance(report["net_pnl"], float)
+
+
+def test_backtest_not_affected_by_real_wallclock_time_past_cutoff(monkeypatch):
+    """Reproduces a confirmed live bug (2026-09-01): RiskManager/Orchestrator's MIS
+    square-off cutoff check used to call is_past_square_off_cutoff() with no arguments,
+    always reading the REAL current IST time — so running a backtest (or nightly_optimize)
+    after 3:20 PM real IST time rejected every CASH BUY and force-closed every open
+    position on the very next bar, regardless of which historical date/time-of-day was
+    actually being replayed. All candle timestamps here are 9:15-9:45 AM (well before the
+    3:20 PM cutoff) — this must produce real trades no matter what the real wall-clock
+    time is when the test happens to run.
+
+    Restores the REAL is_past_square_off_cutoff (tests/conftest.py's autouse fixture
+    patches it to always return False for every test, which would hide this exact
+    regression) so this test genuinely exercises SimClock.now_ist's wiring end to end."""
+    import core.orchestrator as orchestrator_module
+    import core.risk_manager as risk_manager_module
+    from core.market_hours import is_past_square_off_cutoff as real_cutoff_fn
+    monkeypatch.setattr(risk_manager_module, "is_past_square_off_cutoff", real_cutoff_fn)
+    monkeypatch.setattr(orchestrator_module, "is_past_square_off_cutoff", real_cutoff_fn)
+
+    prices = [100.0, 100.2, 100.4, 100.2, 100.0, 99.8, 99.6, 99.8, 100.0, 100.2]
+    candles = _candles(*prices, start=datetime(2026, 1, 1, 9, 15))
+    params = MARsiParams(short_window=2, long_window=4, rsi_window=2,
+                          rsi_entry_min=0, rsi_entry_max=100, min_crossover_gap_pct=0.0,
+                          cooldown_seconds=0)
+
+    run_backtest({"RELIANCE": candles}, ["RELIANCE"], make_settings(), params)
+
+    # Checking FILLED orders directly, not report["total_trades"] (win_count + loss_count
+    # from CLOSED positions only) — a position opened this late in a short 10-bar window
+    # legitimately never closes before the data runs out, which isn't what this test is
+    # about. The point is proving the BUY itself wasn't blocked by the cutoff check.
+    orders = orders_repo.get_recent_orders(10)
+    buy_orders = [o for o in orders if o["side"] == "BUY"]
+    assert len(buy_orders) > 0
+    assert buy_orders[0]["status"] == "FILLED"
 
 
 def test_run_backtest_produces_no_trades_when_fewer_bars_than_warmup_needs():

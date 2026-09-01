@@ -7,7 +7,9 @@ own, only the current-cycle LTP cache needed for the heartbeat file.
 """
 import logging
 import time
+from datetime import datetime
 from typing import Callable
+from zoneinfo import ZoneInfo
 
 from config.settings import Settings
 from core.cost_model import calculate_order_charges, calculate_square_off_penalty
@@ -65,7 +67,8 @@ class Orchestrator:
 
     def __init__(self, settings: Settings, broker, risk_manager, strategy,
                  fno_strategy=None, fno_market_data=None,
-                 clock: Callable[[], float] | None = None):
+                 clock: Callable[[], float] | None = None,
+                 now_ist_fn: Callable[[], datetime] | None = None):
         """fno_strategy/fno_market_data are both optional and None by default — an
         Orchestrator built without them (every existing CASH-only caller) never touches
         the FNO code path at all; run_once_fno()/_maybe_run_fno_cycle() no-op immediately
@@ -75,7 +78,13 @@ class Orchestrator:
         MARsiStrategy's own clock param) — core/backtest_engine.py injects a simulated one
         derived from replayed candle timestamps, so periodic cadences (reconciliation, FNO
         cycle, candle fetch) advance with simulated bar time instead of real wall-clock time
-        during a backtest run."""
+        during a backtest run.
+
+        now_ist_fn defaults to the real wall-clock IST instant, used only for the MIS
+        square-off cutoff check — core/backtest_engine.py injects SimClock.now_ist instead,
+        so a backtest run after 3:20 PM real IST time doesn't force-close every open
+        position on its very next bar regardless of which historical date is actually being
+        replayed (found live 2026-09-01 — see is_past_square_off_cutoff()'s docstring)."""
         self.settings = settings
         self.broker = broker
         self.risk_manager = risk_manager
@@ -83,6 +92,9 @@ class Orchestrator:
         self.fno_strategy = fno_strategy
         self.fno_market_data = fno_market_data
         self._clock = clock if clock is not None else time.monotonic
+        self._now_ist_fn = now_ist_fn if now_ist_fn is not None else (
+            lambda: datetime.now(ZoneInfo("Asia/Kolkata"))
+        )
         self._last_ltp: dict[str, float | None] = {}
         self._consecutive_failures = 0
         # Starts the clock at construction rather than None/0, so the first periodic check
@@ -174,7 +186,7 @@ class Orchestrator:
             return
         self._last_square_off_check_time = now
 
-        if not is_past_square_off_cutoff():
+        if not is_past_square_off_cutoff(self._now_ist_fn()):
             return
 
         for symbol in symbols:

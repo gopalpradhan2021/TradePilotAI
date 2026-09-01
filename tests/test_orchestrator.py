@@ -1129,7 +1129,7 @@ def _seed_open_position(symbol="RELIANCE", qty=5, entry_price=100.0, entry_charg
 
 
 def test_square_off_closes_open_cash_position_past_cutoff(monkeypatch):
-    monkeypatch.setattr(orchestrator_module, "is_past_square_off_cutoff", lambda: True)
+    monkeypatch.setattr(orchestrator_module, "is_past_square_off_cutoff", lambda *a, **k: True)
     settings = make_settings()
     risk_manager = RiskManager(settings.risk)
     broker = FixedPriceBroker(price=110.0)
@@ -1156,7 +1156,7 @@ def test_square_off_closes_open_cash_position_past_cutoff(monkeypatch):
 
 
 def test_square_off_noop_before_cutoff(monkeypatch):
-    monkeypatch.setattr(orchestrator_module, "is_past_square_off_cutoff", lambda: False)
+    monkeypatch.setattr(orchestrator_module, "is_past_square_off_cutoff", lambda *a, **k: False)
     settings = make_settings()
     risk_manager = RiskManager(settings.risk)
     broker = FixedPriceBroker(price=110.0)
@@ -1175,7 +1175,7 @@ def test_square_off_noop_before_cutoff(monkeypatch):
 
 
 def test_square_off_noop_when_no_open_position(monkeypatch):
-    monkeypatch.setattr(orchestrator_module, "is_past_square_off_cutoff", lambda: True)
+    monkeypatch.setattr(orchestrator_module, "is_past_square_off_cutoff", lambda *a, **k: True)
     settings = make_settings()
     risk_manager = RiskManager(settings.risk)
     broker = FixedPriceBroker(price=110.0)
@@ -1192,7 +1192,7 @@ def test_square_off_noop_when_no_open_position(monkeypatch):
 def test_square_off_check_only_runs_once_per_interval(monkeypatch):
     calls = []
 
-    def fake_cutoff():
+    def fake_cutoff(*args, **kwargs):
         calls.append(1)
         return False
 
@@ -1212,7 +1212,7 @@ def test_square_off_check_only_runs_once_per_interval(monkeypatch):
 
 
 def test_square_off_blocked_order_leaves_position_open(monkeypatch):
-    monkeypatch.setattr(orchestrator_module, "is_past_square_off_cutoff", lambda: True)
+    monkeypatch.setattr(orchestrator_module, "is_past_square_off_cutoff", lambda *a, **k: True)
     settings = make_settings(max_trades_per_day=0)
     risk_manager = RiskManager(settings.risk)
     broker = FixedPriceBroker(price=110.0)
@@ -1232,7 +1232,7 @@ def test_square_off_blocked_order_leaves_position_open(monkeypatch):
 
 
 def test_square_off_skips_fno_positions(monkeypatch):
-    monkeypatch.setattr(orchestrator_module, "is_past_square_off_cutoff", lambda: True)
+    monkeypatch.setattr(orchestrator_module, "is_past_square_off_cutoff", lambda *a, **k: True)
     settings = make_settings()
     risk_manager = RiskManager(settings.risk)
     broker = FixedPriceBroker(price=110.0)

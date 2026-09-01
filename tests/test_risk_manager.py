@@ -467,7 +467,7 @@ def test_halt_circuit_breaker_cannot_be_manually_resumed():
 # --- new-entry block past the MIS square-off cutoff (3:20 PM IST) ---------
 
 def test_cash_buy_rejected_past_square_off_cutoff(monkeypatch):
-    monkeypatch.setattr(risk_manager_module, "is_past_square_off_cutoff", lambda: True)
+    monkeypatch.setattr(risk_manager_module, "is_past_square_off_cutoff", lambda *a, **k: True)
     rm = RiskManager(make_cfg())
     order = make_order(side=Side.BUY)
 
@@ -478,7 +478,7 @@ def test_cash_buy_rejected_past_square_off_cutoff(monkeypatch):
 
 
 def test_cash_buy_approved_before_square_off_cutoff(monkeypatch):
-    monkeypatch.setattr(risk_manager_module, "is_past_square_off_cutoff", lambda: False)
+    monkeypatch.setattr(risk_manager_module, "is_past_square_off_cutoff", lambda *a, **k: False)
     rm = RiskManager(make_cfg())
     order = make_order(side=Side.BUY)
 
@@ -490,7 +490,7 @@ def test_cash_buy_approved_before_square_off_cutoff(monkeypatch):
 def test_cash_sell_never_blocked_by_square_off_cutoff(monkeypatch):
     # A SELL closing a real position must always be allowed — same principle as every
     # other BUY-only gate in check() (max_position_qty, order-value cap).
-    monkeypatch.setattr(risk_manager_module, "is_past_square_off_cutoff", lambda: True)
+    monkeypatch.setattr(risk_manager_module, "is_past_square_off_cutoff", lambda *a, **k: True)
     rm = RiskManager(make_cfg())
     order = make_order(side=Side.SELL)
 
@@ -501,9 +501,29 @@ def test_cash_sell_never_blocked_by_square_off_cutoff(monkeypatch):
 
 def test_fno_buy_never_blocked_by_square_off_cutoff(monkeypatch):
     # FNO defaults to PRODUCT_NRML, not MIS — no same-day square-off obligation.
-    monkeypatch.setattr(risk_manager_module, "is_past_square_off_cutoff", lambda: True)
+    monkeypatch.setattr(risk_manager_module, "is_past_square_off_cutoff", lambda *a, **k: True)
     rm = RiskManager(make_cfg(allow_fno=True, max_position_qty=100), mode="PAPER")
     order = make_order(side=Side.BUY, segment=Segment.FNO, lot_size=50)
+
+    result = check(rm, order, ltp=100.0)
+
+    assert result.approved
+
+
+def test_now_ist_fn_injection_drives_square_off_cutoff_not_real_clock(monkeypatch):
+    """Reproduces a confirmed live bug (2026-09-01): the square-off check used to call
+    is_past_square_off_cutoff() with no arguments, always reading the real wall clock —
+    core/backtest_engine.py injects now_ist_fn=SimClock.now_ist specifically so a backtest
+    run after 3:20 PM real IST time isn't affected by that. Restores the REAL cutoff
+    function (undoing conftest.py's autouse always-False patch, which would hide this)."""
+    from core.market_hours import is_past_square_off_cutoff as real_cutoff_fn
+    monkeypatch.setattr(risk_manager_module, "is_past_square_off_cutoff", real_cutoff_fn)
+
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    morning = datetime(2026, 1, 1, 9, 15, tzinfo=ZoneInfo("Asia/Kolkata"))
+    rm = RiskManager(make_cfg(), now_ist_fn=lambda: morning)
+    order = make_order(side=Side.BUY)
 
     result = check(rm, order, ltp=100.0)
 
