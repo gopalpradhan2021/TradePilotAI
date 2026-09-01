@@ -61,6 +61,27 @@ def update_order_status(order_id: int, *, status: str, broker_order_id: str | No
         conn.commit()
 
 
+def get_filled_buy_orders_without_position() -> list[dict]:
+    """FILLED BUY orders with no positions row referencing them as entry_order_id — the
+    signature of a process kill landing between Orchestrator._handle_proposed_order()'s
+    update_order_status(FILLED) and positions_repo.open_position() calls (each opens its
+    own short-lived connection, see core/db/connection.py — the two writes aren't atomic).
+    fill_price IS NOT NULL excludes the unrelated, intentional case of a FILLED result with
+    no fill_price, which core/orchestrator.py already skips opening a position for.
+    """
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT o.* FROM orders o
+            LEFT JOIN positions p ON p.entry_order_id = o.id
+            WHERE o.side = 'BUY' AND o.status = 'FILLED' AND o.fill_price IS NOT NULL
+                  AND p.id IS NULL
+            ORDER BY o.created_at ASC
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 def get_recent_orders(limit: int | None = 20) -> list[dict]:
     # LEFT JOIN positions on exit_order_id: realized_pnl only exists for the SELL that
     # actually closed a position (positions.exit_order_id -> orders.id) — NULL for every

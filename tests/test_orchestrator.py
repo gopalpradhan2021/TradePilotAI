@@ -1,3 +1,4 @@
+import logging
 import time
 from datetime import date, datetime
 
@@ -9,6 +10,7 @@ from core.execution import BrokerPositionFetchError, PaperBroker
 from core.models import OptionChainSnapshot, ProposedOrder, ExecutionResult, Segment, Side, OrderType
 from core.orchestrator import Orchestrator
 from core.position_sizing import calculate_entry_qty
+from core.reconciliation import reconcile_orphaned_fills
 from core.risk_manager import RiskManager
 from strategies.base_strategy import BaseStrategy
 
@@ -145,6 +147,49 @@ def test_approved_buy_order_fills_and_opens_position():
     assert position["entry_price"] == 100.0
 
     assert risk_manager._trades_today == 1
+
+
+def test_crash_between_order_fill_and_position_open_leaves_orphaned_fill_recoverable(monkeypatch):
+    """Reproduces the confirmed live bug: a process kill (or any crash) landing between
+    orders_repo.update_order_status(FILLED) and positions_repo.open_position() inside
+    _handle_proposed_order() — each call opens its own short-lived connection/transaction
+    (core/db/connection.py), so the two writes aren't atomic. Simulated here by making
+    open_position() itself raise, which leaves exactly the same DB state a real kill would:
+    the order row says FILLED, but no position and no risk_manager.record_fill() ever
+    happened. core/reconciliation.py's reconcile_orphaned_fills() must recover it."""
+    real_open_position = orchestrator_module.positions_repo.open_position
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated crash between update_order_status and open_position")
+    monkeypatch.setattr(orchestrator_module.positions_repo, "open_position", boom)
+
+    settings = make_settings(max_order_value_inr=100)
+    risk_manager = RiskManager(settings.risk)
+    broker = FixedPriceBroker(price=100.0)
+    strategy = ScriptedStrategy({"RELIANCE": [make_buy_order()]})
+    orchestrator = Orchestrator(settings, broker, risk_manager, strategy)
+
+    try:
+        orchestrator.run_once(symbols=["RELIANCE"])
+    except RuntimeError:
+        pass  # the simulated crash — a real process kill wouldn't even unwind this far
+
+    orders = orders_repo.get_recent_orders(10)
+    assert orders[0]["status"] == "FILLED"  # the order-status write already landed
+    assert positions_repo.get_open_position("RELIANCE") is None  # but the position never did
+    assert risk_manager._trades_today == 0  # record_fill() never reached either
+
+    # Restore the real open_position() — reconciliation runs post-crash, after the process
+    # (and whatever induced the crash) has restarted clean.
+    monkeypatch.setattr(orchestrator_module.positions_repo, "open_position", real_open_position)
+    reconcile_orphaned_fills(risk_manager, logger=logging.getLogger("test"))
+
+    position = positions_repo.get_open_position("RELIANCE")
+    assert position is not None
+    assert position["qty"] == 1
+    assert position["entry_price"] == 100.0
+    assert risk_manager._trades_today == 1
+    assert risk_manager.halted is False
 
 
 def test_rejected_order_is_blocked_and_no_position_opened():
