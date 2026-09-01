@@ -155,6 +155,15 @@ class IvOiStrategy(BaseStrategy):
         state = self._get_state(underlying)
         atm = _find_atm_strike(chain)
         if atm is None:
+            # Silent before this line — found live 2026-09-01: on an underlying's own
+            # expiry day, "nearest upcoming expiry" resolves to today, but Groww's live
+            # chain for an already-expired contract comes back with strikes=[] post-close.
+            # Self-resolves once the date rolls past this expiry, but was undiagnosable
+            # from logs alone (looked identical to a genuinely stuck/broken fetch).
+            logger.info(
+                "%s: no strikes in chain for expiry %s (may be today's own expiry, "
+                "post-close) — skipping this cycle.", underlying, chain.expiry_date,
+            )
             return None
 
         # Track ATM IV off whichever side has data (prefer CE, fall back to PE) — used

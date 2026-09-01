@@ -286,3 +286,14 @@ def test_no_signal_when_no_strikes_in_chain():
     strategy = IvOiStrategy(params=make_params(), lot_size_fn=fixed_lot_size_fn())
     chain = make_chain(strikes=[])
     assert strategy.decide_fno("NIFTY", chain) is None
+
+
+def test_empty_strikes_logs_instead_of_failing_silently(caplog):
+    # Found live 2026-09-01: an underlying's own expiry day resolves "nearest upcoming" to
+    # today, but Groww's live chain for an already-expired contract comes back empty
+    # post-close — this used to look identical to a genuinely broken fetch in the logs.
+    strategy = IvOiStrategy(params=make_params(), lot_size_fn=fixed_lot_size_fn())
+    chain = make_chain(strikes=[])
+    with caplog.at_level("INFO"):
+        strategy.decide_fno("NIFTY", chain)
+    assert any("no strikes in chain" in r.message for r in caplog.records)
