@@ -200,7 +200,14 @@ def _run_backtest_subprocess(symbols: list[str], start: str, end: str, interval:
             os.remove(out_path)
 
 
-def _render(status: dict) -> str:
+def _render_body(status: dict) -> str:
+    """Renders everything inside <body> — the part that gets swapped in place on every
+    periodic refresh (see the fetch-based refreshDashboard() in _render()'s <script>), so
+    an auto-refresh never causes a full page navigation/reload. Also served standalone by
+    GET /api/dashboard_fragment for that same JS to fetch. Must never reference anything
+    computed only in _render()'s own scope (the page shell/<style>/<script> aren't
+    re-rendered on each refresh) — status_color is inlined on the badge itself for exactly
+    this reason, not left in a CSS class."""
     updated = status.get("updated_at") or "never"
     if updated != "never":
         try:
@@ -400,12 +407,116 @@ def _render(status: dict) -> str:
     win_rate = status.get("win_rate")
     win_rate_str = f"{win_rate:.0f}%" if win_rate is not None else "—"
 
+    return f"""<div class="topnav">
+        <div class="topnav-left">
+            <span class="topnav-title">TradePilotAI</span>
+            <span class="badge" style="background:{status_color};">{status_text}</span>
+        </div>
+        <nav class="topnav-links">
+            <a class="topnav-link active" href="/">Dashboard</a>
+            <a class="topnav-link" href="/backtest">Backtest</a>
+        </nav>
+        <div class="topnav-right">
+            {switch_button}
+            {proc_badge}
+            <a href="/logout" class="topnav-logout">Log out</a>
+        </div>
+    </div>
+    <div class="subbar">
+        <div class="subbar-left">
+            <span class="subbar-label">Market status:</span>
+            <span class="subbar-pill" style="color:{mkt_color};" title="{mkt_label}">
+                <span class="mkt-dot" style="background:{mkt_color};"></span>NSE {mkt_state}
+            </span>
+            <span id="ist-clock" class="subbar-clock">{clock_str} IST</span>
+        </div>
+        <div class="subbar-right">
+            <span class="subbar-stat"><span class="subbar-label">Mode:</span>
+                <span class="subbar-value">{status.get('mode', 'UNKNOWN')}</span></span>
+            <span class="subbar-stat"><span class="subbar-label">Trades today:</span>
+                <span class="subbar-value mono">{status.get('trades_today', 0)}</span></span>
+            <span class="subbar-stat"><span class="subbar-label">Symbols watched:</span>
+                <span class="subbar-value mono">{len(status.get('symbols', []))}</span></span>
+        </div>
+    </div>
+    {"<div class='halt-banner'>Halt reason: " + status.get('halt_reason', '') + "</div>" if halted else ""}
+    <p style="color:#8b949e; font-size:0.8rem; margin:10px 0 0;">Last updated: {updated}</p>
+
+    <div class="dashboard-grid">
+        <div class="col-main">
+            <div class="card">
+                <h3 style="margin-top:0;">Strategy signals</h3>
+                <p style="color:#8b949e; font-size:0.85rem; margin-top:-8px;">
+                    What the strategy is currently seeing per symbol — how close it is to a real
+                    crossover signal, not just the raw price.
+                </p>
+                <div class="sig-terminal mono">{strategy_rows}</div>
+            </div>
+            {fno_signals_card}
+            <div class="card">
+                <h3 style="margin-top:0;">Open positions</h3>
+                <table><tr><th>Symbol</th><th class="num">Qty</th><th class="num">Entry price</th><th class="num">Current price</th><th class="num">Unrealized P&amp;L</th></tr>{position_rows}</table>
+            </div>
+
+            <div class="card">
+                <h3 style="margin-top:0;">All orders</h3>
+                <div class="scroll-table">
+                    <table><tr><th>Time</th><th>Symbol</th><th>Segment</th><th>Side</th><th class="num">Qty</th><th>Status</th><th class="num">Price</th><th class="num">P&amp;L</th><th>Reason</th></tr>{order_rows}</table>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-side">
+            <div class="card">
+                <h3 style="margin-top:0;">Performance</h3>
+                <div class="stat-row">
+                    <div class="stat"><div class="label">Wins</div><div class="value" style="color:#2ecc71;">{win_count}</div></div>
+                    <div class="stat"><div class="label">Losses</div><div class="value" style="color:#e74c3c;">{loss_count}</div></div>
+                    <div class="stat"><div class="label">Win rate</div><div class="value">{win_rate_str}</div></div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3 style="margin-top:0;">Capital &amp; risk</h3>
+                <div style="display:flex; flex-direction:column; gap:10px;">
+                    <div style="display:flex; justify-content:space-between; border-bottom:1px solid #21262d; padding-bottom:8px;">
+                        <span class="dim" style="font-size:0.78rem;">Deployed capital</span>
+                        <span class="mono" style="font-weight:600;">₹{status.get('deployed_capital', 0):,.2f}</span>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; border-bottom:1px solid #21262d; padding-bottom:8px;">
+                        <span class="dim" style="font-size:0.78rem;">Total capital cap</span>
+                        <span class="mono" style="font-weight:600;">₹{status.get('total_capital_cap', 0):,.2f}</span>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; border-bottom:1px solid #21262d; padding-bottom:8px;">
+                        <span class="dim" style="font-size:0.78rem;">Realized P&amp;L today</span>
+                        <span class="mono" style="font-weight:600; color:{pnl_color};">₹{status.get('realized_pnl_today', 0):,.2f}</span>
+                    </div>
+                    <div style="display:flex; justify-content:space-between; border-bottom:1px solid #21262d; padding-bottom:8px;">
+                        <span class="dim" style="font-size:0.78rem;">Daily loss limit</span>
+                        <span class="mono" style="font-weight:600;">₹{status.get('max_daily_loss', 0):,.2f}</span>
+                    </div>
+                    <div style="display:flex; justify-content:space-between;">
+                        <span class="dim" style="font-size:0.78rem;">F&amp;O trading</span>
+                        <span style="font-weight:600; color:{'#2ecc71' if status.get('allow_fno') else '#8b949e'};">{'Enabled' if status.get('allow_fno') else 'Disabled'}</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3 style="margin-top:0;">Latest prices</h3>
+                <div class="ltp-grid">{ltp_rows}</div>
+            </div>
+        </div>
+    </div>
+"""
+
+
+def _render(status: dict) -> str:
     return f"""
 <!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
-    <meta http-equiv="refresh" content="10">
     <title>Groww Agent Dashboard</title>
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap">
     <style>
@@ -417,8 +528,7 @@ def _render(status: dict) -> str:
         .num {{ text-align: right; }}
         .dim {{ color: #8b949e; }}
         .badge {{ display: inline-block; padding: 4px 12px; border-radius: 4px;
-                  color: #0d1117; font-weight: 700; font-size: 0.78rem; letter-spacing: 0.03em;
-                  background: {status_color}; }}
+                  color: #0d1117; font-weight: 700; font-size: 0.78rem; letter-spacing: 0.03em; }}
         table {{ width: 100%; border-collapse: collapse; margin-top: 4px; }}
         th, td {{ text-align: left; padding: 8px 10px; border-bottom: 1px solid #21262d;
                    font-size: 0.85rem; }}
@@ -550,110 +660,30 @@ def _render(status: dict) -> str:
             if (reason === null) return;
             postBotAction('/api/bot/start', reason);
         }}
+
+        // Swaps #live-region's content in place every 10s instead of a full page
+        // reload (the old <meta http-equiv="refresh"> caused a visible flash/scroll-
+        // reset on every refresh) — fetches the same markup _render_body() produces,
+        // served standalone by GET /api/dashboard_fragment.
+        async function refreshDashboard() {{
+            try {{
+                const res = await fetch('/api/dashboard_fragment');
+                if (res.status === 401) {{
+                    window.location.href = '/login';
+                    return;
+                }}
+                if (!res.ok) return;  // transient failure — try again next tick, no disruption
+                const el = document.getElementById('live-region');
+                if (el) el.innerHTML = await res.text();
+            }} catch (e) {{
+                // network hiccup — silently retry next tick rather than disrupting the view
+            }}
+        }}
+        setInterval(refreshDashboard, 10000);
     </script>
 </head>
 <body>
-    <div class="topnav">
-        <div class="topnav-left">
-            <span class="topnav-title">TradePilotAI</span>
-            <span class="badge">{status_text}</span>
-        </div>
-        <nav class="topnav-links">
-            <a class="topnav-link active" href="/">Dashboard</a>
-            <a class="topnav-link" href="/backtest">Backtest</a>
-        </nav>
-        <div class="topnav-right">
-            {switch_button}
-            {proc_badge}
-            <a href="/logout" class="topnav-logout">Log out</a>
-        </div>
-    </div>
-    <div class="subbar">
-        <div class="subbar-left">
-            <span class="subbar-label">Market status:</span>
-            <span class="subbar-pill" style="color:{mkt_color};" title="{mkt_label}">
-                <span class="mkt-dot" style="background:{mkt_color};"></span>NSE {mkt_state}
-            </span>
-            <span id="ist-clock" class="subbar-clock">{clock_str} IST</span>
-        </div>
-        <div class="subbar-right">
-            <span class="subbar-stat"><span class="subbar-label">Mode:</span>
-                <span class="subbar-value">{status.get('mode', 'UNKNOWN')}</span></span>
-            <span class="subbar-stat"><span class="subbar-label">Trades today:</span>
-                <span class="subbar-value mono">{status.get('trades_today', 0)}</span></span>
-            <span class="subbar-stat"><span class="subbar-label">Symbols watched:</span>
-                <span class="subbar-value mono">{len(status.get('symbols', []))}</span></span>
-        </div>
-    </div>
-    {"<div class='halt-banner'>Halt reason: " + status.get('halt_reason', '') + "</div>" if halted else ""}
-    <p style="color:#8b949e; font-size:0.8rem; margin:10px 0 0;">Last updated: {updated} · auto-refreshes every 10s</p>
-
-    <div class="dashboard-grid">
-        <div class="col-main">
-            <div class="card">
-                <h3 style="margin-top:0;">Strategy signals</h3>
-                <p style="color:#8b949e; font-size:0.85rem; margin-top:-8px;">
-                    What the strategy is currently seeing per symbol — how close it is to a real
-                    crossover signal, not just the raw price.
-                </p>
-                <div class="sig-terminal mono">{strategy_rows}</div>
-            </div>
-            {fno_signals_card}
-            <div class="card">
-                <h3 style="margin-top:0;">Open positions</h3>
-                <table><tr><th>Symbol</th><th class="num">Qty</th><th class="num">Entry price</th><th class="num">Current price</th><th class="num">Unrealized P&amp;L</th></tr>{position_rows}</table>
-            </div>
-
-            <div class="card">
-                <h3 style="margin-top:0;">All orders</h3>
-                <div class="scroll-table">
-                    <table><tr><th>Time</th><th>Symbol</th><th>Segment</th><th>Side</th><th class="num">Qty</th><th>Status</th><th class="num">Price</th><th class="num">P&amp;L</th><th>Reason</th></tr>{order_rows}</table>
-                </div>
-            </div>
-        </div>
-
-        <div class="col-side">
-            <div class="card">
-                <h3 style="margin-top:0;">Performance</h3>
-                <div class="stat-row">
-                    <div class="stat"><div class="label">Wins</div><div class="value" style="color:#2ecc71;">{win_count}</div></div>
-                    <div class="stat"><div class="label">Losses</div><div class="value" style="color:#e74c3c;">{loss_count}</div></div>
-                    <div class="stat"><div class="label">Win rate</div><div class="value">{win_rate_str}</div></div>
-                </div>
-            </div>
-
-            <div class="card">
-                <h3 style="margin-top:0;">Capital &amp; risk</h3>
-                <div style="display:flex; flex-direction:column; gap:10px;">
-                    <div style="display:flex; justify-content:space-between; border-bottom:1px solid #21262d; padding-bottom:8px;">
-                        <span class="dim" style="font-size:0.78rem;">Deployed capital</span>
-                        <span class="mono" style="font-weight:600;">₹{status.get('deployed_capital', 0):,.2f}</span>
-                    </div>
-                    <div style="display:flex; justify-content:space-between; border-bottom:1px solid #21262d; padding-bottom:8px;">
-                        <span class="dim" style="font-size:0.78rem;">Total capital cap</span>
-                        <span class="mono" style="font-weight:600;">₹{status.get('total_capital_cap', 0):,.2f}</span>
-                    </div>
-                    <div style="display:flex; justify-content:space-between; border-bottom:1px solid #21262d; padding-bottom:8px;">
-                        <span class="dim" style="font-size:0.78rem;">Realized P&amp;L today</span>
-                        <span class="mono" style="font-weight:600; color:{pnl_color};">₹{status.get('realized_pnl_today', 0):,.2f}</span>
-                    </div>
-                    <div style="display:flex; justify-content:space-between; border-bottom:1px solid #21262d; padding-bottom:8px;">
-                        <span class="dim" style="font-size:0.78rem;">Daily loss limit</span>
-                        <span class="mono" style="font-weight:600;">₹{status.get('max_daily_loss', 0):,.2f}</span>
-                    </div>
-                    <div style="display:flex; justify-content:space-between;">
-                        <span class="dim" style="font-size:0.78rem;">F&amp;O trading</span>
-                        <span style="font-weight:600; color:{'#2ecc71' if status.get('allow_fno') else '#8b949e'};">{'Enabled' if status.get('allow_fno') else 'Disabled'}</span>
-                    </div>
-                </div>
-            </div>
-
-            <div class="card">
-                <h3 style="margin-top:0;">Latest prices</h3>
-                <div class="ltp-grid">{ltp_rows}</div>
-            </div>
-        </div>
-    </div>
+    <div id="live-region">{_render_body(status)}</div>
 </body>
 </html>
 """
@@ -731,6 +761,17 @@ def dashboard(request: Request):
 def api_status(request: Request):
     _require_api_auth(request)
     return _build_status_view()
+
+
+@app.get("/api/dashboard_fragment", response_class=HTMLResponse)
+def api_dashboard_fragment(request: Request):
+    """Fetched by the dashboard page's own refreshDashboard() every 10s to swap
+    #live-region's content in place — see _render()'s <script>. 401s (via
+    _require_api_auth, not a redirect) so the fetch-based caller can distinguish "session
+    expired" from a normal HTML response, matching /api/status's own auth pattern since
+    this is also called via fetch(), never a page navigation."""
+    _require_api_auth(request)
+    return _render_body(_build_status_view())
 
 
 def _bot_process_status() -> str:
