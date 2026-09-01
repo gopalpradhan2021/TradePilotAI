@@ -389,18 +389,20 @@ def _render_body(status: dict) -> str:
         f"<td>{_side_cell(o.get('side', ''))}</td><td class='mono num'>{o.get('qty')}</td>"
         f"<td>{_status_chip(o.get('status', ''))}</td>"
         f"<td class='mono num'>{_fmt_price(o.get('fill_price'))}</td>"
+        f"<td class='mono num dim'>{_fmt_price(o.get('charges'))}</td>"
         f"<td class='mono num'>{_fmt_pnl(o.get('realized_pnl'))}</td>"
         f"<td class='dim'>{o.get('reason', '')}</td></tr>"
         for o in reversed(status.get("recent_orders", []))
-    ) or "<tr><td colspan='9'>No orders yet</td></tr>"
+    ) or "<tr><td colspan='10'>No orders yet</td></tr>"
 
     position_rows = "".join(
         f"<tr><td>{p['symbol']}</td><td class='mono num'>{p['qty']}</td>"
         f"<td class='mono num'>₹{p['entry_price']:.2f}</td>"
         f"<td class='mono num'>{'₹' + format(p['current_price'], '.2f') if p['current_price'] is not None else '—'}</td>"
+        f"<td class='mono num dim'>{_fmt_price(p.get('entry_charges'))}</td>"
         f"<td class='mono num'>{_fmt_pnl(p['unrealized_pnl'])}</td></tr>"
         for p in status.get("open_positions", [])
-    ) or "<tr><td colspan='5'>No open positions</td></tr>"
+    ) or "<tr><td colspan='6'>No open positions</td></tr>"
 
     win_count = status.get("win_count", 0)
     loss_count = status.get("loss_count", 0)
@@ -455,13 +457,13 @@ def _render_body(status: dict) -> str:
             {fno_signals_card}
             <div class="card">
                 <h3 style="margin-top:0;">Open positions</h3>
-                <table><tr><th>Symbol</th><th class="num">Qty</th><th class="num">Entry price</th><th class="num">Current price</th><th class="num">Unrealized P&amp;L</th></tr>{position_rows}</table>
+                <table><tr><th>Symbol</th><th class="num">Qty</th><th class="num">Entry price</th><th class="num">Current price</th><th class="num">Entry charges</th><th class="num">Unrealized P&amp;L</th></tr>{position_rows}</table>
             </div>
 
             <div class="card">
                 <h3 style="margin-top:0;">All orders</h3>
                 <div class="scroll-table">
-                    <table><tr><th>Time</th><th>Symbol</th><th>Segment</th><th>Side</th><th class="num">Qty</th><th>Status</th><th class="num">Price</th><th class="num">P&amp;L</th><th>Reason</th></tr>{order_rows}</table>
+                    <table><tr><th>Time</th><th>Symbol</th><th>Segment</th><th>Side</th><th class="num">Qty</th><th>Status</th><th class="num">Price</th><th class="num">Charges</th><th class="num">P&amp;L</th><th>Reason</th></tr>{order_rows}</table>
                 </div>
             </div>
         </div>
@@ -718,6 +720,7 @@ def _build_status_view() -> dict:
             "status": o["status"],
             "reason": o["message"] if o["status"] == "BLOCKED" else o["reason"],
             "fill_price": o["fill_price"],
+            "charges": o["charges"],
             "realized_pnl": o["realized_pnl"],
         }
         for o in reversed(orders_repo.get_recent_orders(limit=None))
