@@ -68,6 +68,23 @@ def test_close_position_with_no_open_position_raises():
         positions_repo.close_position(symbol="GHOST", exit_price=1.0, exit_order_id=1)
 
 
+def test_get_recent_orders_includes_realized_pnl_for_the_exit_order_only():
+    # dashboard/app.py shows this to answer "what price did it enter/exit at, and what
+    # was the actual P&L" — realized_pnl must land on the SELL order that closed the
+    # position, not the BUY, and not bleed onto unrelated orders.
+    oid1 = orders_repo.insert_order(make_order(), status="FILLED", reference_price=100.0)
+    positions_repo.open_position(symbol="RELIANCE", qty=3, entry_price=100.0, entry_order_id=oid1)
+    oid2 = orders_repo.insert_order(make_order(side=Side.SELL), status="FILLED", reference_price=110.0)
+    positions_repo.close_position(symbol="RELIANCE", exit_price=110.0, exit_order_id=oid2)
+
+    orders = orders_repo.get_recent_orders(limit=10)
+    buy_row = next(o for o in orders if o["side"] == "BUY")
+    sell_row = next(o for o in orders if o["side"] == "SELL")
+
+    assert sell_row["realized_pnl"] == 30.0  # (110 - 100) * 3
+    assert buy_row["realized_pnl"] is None
+
+
 # --- transaction cost model (entry_charges / exit_charges / net realized_pnl) --------
 
 def test_open_position_stores_entry_charges():

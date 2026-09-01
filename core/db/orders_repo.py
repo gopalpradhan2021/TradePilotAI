@@ -62,10 +62,16 @@ def update_order_status(order_id: int, *, status: str, broker_order_id: str | No
 
 
 def get_recent_orders(limit: int | None = 20) -> list[dict]:
+    # LEFT JOIN positions on exit_order_id: realized_pnl only exists for the SELL that
+    # actually closed a position (positions.exit_order_id -> orders.id) — NULL for every
+    # BUY and for any order that never closed anything, which the dashboard renders as "—".
     query = """
-        SELECT symbol, side, qty, segment, underlying_symbol, status, fill_price, charges,
-               reason, message, created_at
-        FROM orders ORDER BY created_at DESC, id DESC
+        SELECT o.symbol, o.side, o.qty, o.segment, o.underlying_symbol, o.status,
+               o.fill_price, o.charges, o.reason, o.message, o.created_at,
+               p.realized_pnl AS realized_pnl
+        FROM orders o
+        LEFT JOIN positions p ON p.exit_order_id = o.id
+        ORDER BY o.created_at DESC, o.id DESC
     """
     params: tuple = ()
     if limit is not None:
