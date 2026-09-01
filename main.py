@@ -23,7 +23,7 @@ from core.execution import PaperBroker, LiveBroker
 from core.fno_market_data import FnoMarketData
 from core.margin_provider import GrowwMarginProvider
 from core.notifier import send_notification
-from core.reconciliation import reconcile_positions
+from core.reconciliation import reconcile_orphaned_fills, reconcile_positions
 from core.risk_manager import RiskManager
 from core.orchestrator import Orchestrator
 from strategies.iv_oi_strategy import IvOiStrategy
@@ -117,6 +117,11 @@ def main():
     margin_provider = GrowwMarginProvider(groww_client) if groww_client is not None else None
     risk_manager = RiskManager(settings.risk, ntfy_topic=settings.ntfy_topic, mode=settings.mode,
                                 margin_provider=margin_provider)
+
+    # Local orders-vs-positions integrity check, both modes — must run before the
+    # restore_position() loop below, which reads positions_repo and would otherwise miss a
+    # position this recovers. See core/reconciliation.py's docstring for the failure mode.
+    reconcile_orphaned_fills(risk_manager, logger)
 
     if want_live:
         broker = LiveBroker(groww_client)

@@ -3,9 +3,11 @@ Compares local position records against what the broker actually reports. Used b
 startup (main.py, before entering the trading loop) and periodically during the trading loop
 itself (core/orchestrator.py) — same check, same halt behavior, just a different cadence.
 """
-from core.db import positions_repo
+import sqlite3
+
+from core.db import orders_repo, positions_repo
 from core.execution import BrokerPositionFetchError
-from core.models import Segment
+from core.models import Segment, Side
 
 
 def _check_one(broker, risk_manager, trading_symbol: str, local_qty: int,
@@ -52,3 +54,52 @@ def reconcile_positions(broker, risk_manager, symbols: list[str], logger) -> Non
         if pos.get("segment") != "FNO":
             continue  # CASH already covered by the loop above
         _check_one(broker, risk_manager, pos["symbol"], pos["qty"], Segment.FNO, logger)
+
+
+def reconcile_orphaned_fills(risk_manager, logger) -> None:
+    """Startup-only, broker-independent integrity check (runs in BOTH modes — this is a
+    purely local orders-vs-positions consistency check, not a broker comparison): finds a
+    FILLED BUY order with no positions row and reopens the position deterministically from
+    the order's own recorded fill_price/qty/segment/margin/charges.
+
+    This closes the gap left by Orchestrator._handle_proposed_order() doing
+    update_order_status(FILLED) and positions_repo.open_position() as two separate
+    connections/transactions (see core/db/connection.py) — a process kill landing between
+    them leaves a FILLED order with no position, silently losing track of a real fill. Since
+    the order row already carries everything needed to reconstruct the position exactly (not
+    a guess, unlike a broker-side mismatch), recovery is safe to do automatically. Also
+    replays the risk_manager.record_fill() bookkeeping (trade count) that never ran because
+    the crash pre-empted it too.
+
+    If a *different* order already holds the OPEN slot for that symbol, the position can't
+    be reopened (the DB's one-open-position-per-symbol unique index rejects it) — that's an
+    unresolvable local inconsistency, so this halts (AUTO) instead of guessing, same as a
+    broker mismatch.
+    """
+    for order in orders_repo.get_filled_buy_orders_without_position():
+        symbol = order["symbol"]
+        logger.critical(
+            "RECONCILIATION: orphaned FILLED order id=%s %s qty=%s @ %s had no positions "
+            "row (likely a process restart mid-fill) — reopening position from the order's "
+            "own record.", order["id"], symbol, order["qty"], order["fill_price"],
+        )
+        try:
+            positions_repo.open_position(
+                symbol=symbol, qty=order["qty"], entry_price=order["fill_price"],
+                entry_order_id=order["id"], segment=order.get("segment", "CASH"),
+                underlying_symbol=order.get("underlying_symbol"),
+                margin_used=order.get("margin_used"), entry_charges=order.get("charges") or 0.0,
+            )
+        except sqlite3.IntegrityError as e:
+            reason = (
+                f"Reconciliation: orphaned FILLED order id={order['id']} for {symbol} could "
+                f"not be recovered — another OPEN position already exists for this symbol "
+                f"({e})."
+            )
+            logger.critical(reason)
+            risk_manager.halt_reconciliation_mismatch(reason)
+            continue
+
+        order_value = order["fill_price"] * order["qty"]
+        risk_manager.record_fill(side=Side.BUY, order_value=order_value, pnl_delta=0.0,
+                                  order_id=order["id"])
