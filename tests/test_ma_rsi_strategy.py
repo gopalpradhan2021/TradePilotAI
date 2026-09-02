@@ -307,7 +307,7 @@ def test_default_params_match_module_constants():
 
 def test_overridden_params_change_warmup_length():
     """A smaller long_window should let the strategy fully warm up on far fewer candles than
-    the production default (21) requires — proves decide() is actually reading self.params
+    the production default (15) requires — proves decide() is actually reading self.params
     for its indicator windows, not the module constants."""
     candles = [{"close": p} for p in [100.0, 101.0, 99.0, 102.0]]
 
@@ -319,7 +319,7 @@ def test_overridden_params_change_warmup_length():
     assert short_state.prev_short_ma is not None
     assert short_state.prev_long_ma is not None
 
-    default_strategy = MARsiStrategy()  # long_window=21 by default
+    default_strategy = MARsiStrategy()  # long_window=15 by default
     default_strategy.update_candles("RELIANCE", candles)
     default_strategy.decide("RELIANCE", candles[-1]["close"])
     default_state = default_strategy._get_state("RELIANCE")

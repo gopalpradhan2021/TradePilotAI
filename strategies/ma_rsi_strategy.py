@@ -26,14 +26,20 @@ from strategies.base_strategy import BaseStrategy
 
 logger = logging.getLogger("groww_agent.strategy.ma_rsi")
 
+# LONG_WINDOW/RSI_ENTRY_MIN/MIN_CROSSOVER_GAP_PCT/COOLDOWN_SECONDS set to the winning
+# combo from a 5-minute intraday nightly_optimize sweep (2026-09-02, 243-combo grid,
+# 28-day lookback) — the only one of 15 watched symbols where any candidate beat the
+# prior defaults out-of-sample with real confidence (RELIANCE: +82.55 vs -181.53).
+# Applies to every watched symbol (no per-symbol params exist); not validated against
+# the other 14 symbols' own data specifically.
 SHORT_WINDOW = 9
-LONG_WINDOW = 21
+LONG_WINDOW = 15
 RSI_WINDOW = 14
 # Entry floor lowered from 40 (2026-08-28) to admit trades recovering from a
 # dip rather than only ones already mid-uptrend — ceiling stays at 70, well
 # clear of RSI_EXIT_OVERBOUGHT (75), so an entry is never one tick from its
 # own exit trigger.
-RSI_ENTRY_MIN = 30
+RSI_ENTRY_MIN = 35
 RSI_ENTRY_MAX = 70
 RSI_EXIT_OVERBOUGHT = 75
 STOP_LOSS_PCT = 2.0
@@ -48,12 +54,12 @@ DEFAULT_ORDER_QTY = 1
 # 2026-08-26 was ~0.0008% (RELIANCE oscillating 1304-1307). Lowered from
 # 0.0005 (~60x that floor) to 0.0002 (2026-08-28) to catch more real
 # crossovers after a quiet first two live days produced almost no trades;
-# still ~25x the observed noise floor.
-MIN_CROSSOVER_GAP_PCT = 0.0002
+# raised to 0.0003 (2026-09-02) — see the nightly_optimize note above.
+MIN_CROSSOVER_GAP_PCT = 0.0003
 
 # Minimum wall-clock time after closing a position before a new entry is
 # allowed — kills the sub-minute flip-flops seen live (5s, 20s holds).
-COOLDOWN_SECONDS = 60
+COOLDOWN_SECONDS = 30
 
 # MA/RSI are computed off real OHLC candle closes (fetched periodically by
 # Orchestrator via broker.get_recent_candles(), see update_candles() below),
