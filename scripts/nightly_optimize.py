@@ -54,7 +54,13 @@ SHORT_WINDOW_CHOICES = [5, 9, 12]
 LONG_WINDOW_CHOICES = [15, 21, 26]
 RSI_BAND_CHOICES = [(35, 70), (40, 70), (40, 75)]
 MIN_GAP_CHOICES = [0.0003, 0.0005, 0.001]
-COOLDOWN_CHOICES = [30, 60, 120]
+# Stop-loss tightness, not cooldown — a 2026-09-02 5-minute sweep across all 15 symbols found
+# avg_loss (-85.86) far exceeding avg_win (+51.71) at the production stop_loss_pct=2.0, pointing
+# at exit sizing rather than entry timing. Prior sweeps also found cooldown_seconds barely
+# discriminated between good/bad candidates (winners clustered at the smallest choice regardless),
+# so this slot searches stop_loss_pct instead at the same grid size/runtime.
+STOP_LOSS_CHOICES = [1.0, 1.5, 2.0]
+FIXED_COOLDOWN_SECONDS = 30
 
 
 def _parse_args():
@@ -79,16 +85,17 @@ def _param_grid(quick: bool = False):
     long_choices = LONG_WINDOW_CHOICES[:2] if quick else LONG_WINDOW_CHOICES
     rsi_choices = RSI_BAND_CHOICES[:2] if quick else RSI_BAND_CHOICES
     gap_choices = MIN_GAP_CHOICES[:2] if quick else MIN_GAP_CHOICES
-    cooldown_choices = COOLDOWN_CHOICES[:2] if quick else COOLDOWN_CHOICES
-    for short_w, long_w, rsi_band, gap, cooldown in itertools.product(
-        short_choices, long_choices, rsi_choices, gap_choices, cooldown_choices,
+    stop_loss_choices = STOP_LOSS_CHOICES[:2] if quick else STOP_LOSS_CHOICES
+    for short_w, long_w, rsi_band, gap, stop_loss in itertools.product(
+        short_choices, long_choices, rsi_choices, gap_choices, stop_loss_choices,
     ):
         if long_w <= short_w:
             continue
         yield MARsiParams(
             short_window=short_w, long_window=long_w,
             rsi_entry_min=rsi_band[0], rsi_entry_max=rsi_band[1],
-            min_crossover_gap_pct=gap, cooldown_seconds=cooldown,
+            min_crossover_gap_pct=gap, stop_loss_pct=stop_loss,
+            cooldown_seconds=FIXED_COOLDOWN_SECONDS,
         )
 
 
