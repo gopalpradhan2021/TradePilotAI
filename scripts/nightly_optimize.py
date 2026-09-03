@@ -48,19 +48,22 @@ IN_SAMPLE_FRACTION = 2 / 3
 
 # Small, explicit grid — kept intentionally modest so a nightly run on a 512MB droplet finishes
 # in a reasonable time running strictly sequentially, one candidate at a time. --quick trims each
-# dimension to its first 2 choices (32 combos instead of 243) — see the module docstring for why
-# that matters for --interval 5minute specifically.
+# dimension to 2 choices (up to 32 combos instead of 243 — fewer if a cross-parameter guard below
+# filters some out) — see the module docstring for why that matters for --interval 5minute.
 SHORT_WINDOW_CHOICES = [5, 9, 12]
 LONG_WINDOW_CHOICES = [15, 21, 26]
 RSI_BAND_CHOICES = [(35, 70), (40, 70), (40, 75)]
 MIN_GAP_CHOICES = [0.0003, 0.0005, 0.001]
-# Stop-loss tightness, not cooldown — a 2026-09-02 5-minute sweep across all 15 symbols found
-# avg_loss (-85.86) far exceeding avg_win (+51.71) at the production stop_loss_pct=2.0, pointing
-# at exit sizing rather than entry timing. Prior sweeps also found cooldown_seconds barely
-# discriminated between good/bad candidates (winners clustered at the smallest choice regardless),
-# so this slot searches stop_loss_pct instead at the same grid size/runtime.
-STOP_LOSS_CHOICES = [1.0, 1.5, 2.0]
+# RSI exit threshold, not stop-loss or cooldown. A 2026-09-02 stop_loss_pct sweep (1.0/1.5/2.0)
+# found the stop essentially never binds — the best candidates for every symbol landed on the
+# exact same P&L as baseline regardless of stop tightness, meaning trades exit via the RSI-
+# overbought or crossover-down signal well before ever reaching even a 1% stop. That makes
+# rsi_exit_overbought the actual lever controlling most exits, not stop_loss_pct — this slot
+# searches it instead, at the same grid size/runtime. cooldown/stop_loss stay fixed at their
+# already-established values (30s, 2.0%).
+RSI_EXIT_CHOICES = [65, 70, 75]
 FIXED_COOLDOWN_SECONDS = 30
+FIXED_STOP_LOSS_PCT = 2.0
 
 
 def _parse_args():
@@ -74,7 +77,7 @@ def _parse_args():
                          help="Lookback window in days (default 179; Groww caps 5minute candles "
                               "at roughly 30 days — pass e.g. --days 28 for an intraday sweep).")
     parser.add_argument("--quick", action="store_true",
-                         help="Trim the parameter grid to 32 combinations instead of 243 — for "
+                         help="Trim the parameter grid to up to 32 combinations instead of 243 — for "
                               "slow intraday (--interval 5minute) sweeps.")
     return parser.parse_args()
 
@@ -85,16 +88,22 @@ def _param_grid(quick: bool = False):
     long_choices = LONG_WINDOW_CHOICES[:2] if quick else LONG_WINDOW_CHOICES
     rsi_choices = RSI_BAND_CHOICES[:2] if quick else RSI_BAND_CHOICES
     gap_choices = MIN_GAP_CHOICES[:2] if quick else MIN_GAP_CHOICES
-    stop_loss_choices = STOP_LOSS_CHOICES[:2] if quick else STOP_LOSS_CHOICES
-    for short_w, long_w, rsi_band, gap, stop_loss in itertools.product(
-        short_choices, long_choices, rsi_choices, gap_choices, stop_loss_choices,
+    # [-2:] not [:2] — quick's truncated rsi_choices are both capped at entry_max=70 (the first
+    # two RSI_BAND_CHOICES), so the exit choices must include something above that or every
+    # combo gets filtered by the rsi_exit > entry_max guard below.
+    rsi_exit_choices = RSI_EXIT_CHOICES[-2:] if quick else RSI_EXIT_CHOICES
+    for short_w, long_w, rsi_band, gap, rsi_exit in itertools.product(
+        short_choices, long_choices, rsi_choices, gap_choices, rsi_exit_choices,
     ):
         if long_w <= short_w:
             continue
+        if rsi_exit <= rsi_band[1]:
+            continue  # exit threshold must clear the entry band's own ceiling
         yield MARsiParams(
             short_window=short_w, long_window=long_w,
             rsi_entry_min=rsi_band[0], rsi_entry_max=rsi_band[1],
-            min_crossover_gap_pct=gap, stop_loss_pct=stop_loss,
+            rsi_exit_overbought=rsi_exit,
+            min_crossover_gap_pct=gap, stop_loss_pct=FIXED_STOP_LOSS_PCT,
             cooldown_seconds=FIXED_COOLDOWN_SECONDS,
         )
 
